@@ -19,10 +19,10 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from services.unified_order_service import unified_order_service, OrderProcessingResult
 from middleware.rate_limit import rate_limit_dependency
 from app.services.payment_service import PaymentService
 from app.models.order import Order, OrderStatus, PaymentStatus, PaymentMethod
+from app.database.hybrid_db import HybridDatabase, OrderData, HybridOrderResult
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orders", tags=["orders"])
 payment_service = PaymentService()
 
-# In-memory storage for demo (replace with database in production)
-orders_db = {}
-customer_orders = {}
+# Initialize HybridDatabase for real order storage
+db = HybridDatabase()
+logger.info("HybridDatabase initialized for orders")
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -328,46 +328,38 @@ async def confirm_order(
     Returns confirmation details and estimated delivery time.
     """
     try:
-        # Check if order exists
-        if order_id not in orders_db:
+        # Get order from DynamoDB
+        db_result = await db.get_order(order_id)
+
+        if not db_result.success:
+            if "not found" in str(db_result.error).lower():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
+                status_code=500,
+                detail=f"Failed to retrieve order: {db_result.error}"
             )
-        
-        order = orders_db[order_id]
-        
-        # Calculate total amount from entities
-        total_amount = 0.0
-        for entity in order["entities"]:
-            product = entity.get("product", "")
-            quantity = entity.get("quantity", 0)
-            
-            # Simplified pricing (replace with actual pricing logic)
-            base_prices = {
-                "rice": 50, "flour": 40, "oil": 120, "milk": 60,
-                "bread": 30, "noodles": 15, "biscuits": 20, "tea": 50,
-                "coffee": 100, "sugar": 45, "salt": 20
-            }
-            price_per_unit = base_prices.get(product, 30)
-            total_amount += quantity * price_per_unit
-        
-        # Update order with confirmation details
-        order.update({
-            "status": "confirmed",
-            "updated_at": datetime.now(),
-            "customer_details": request.customer_details,
-            "delivery_address": request.delivery_address,
-            "payment_method": request.payment_method,
-            "total_amount": total_amount,
-            "special_instructions": request.special_instructions
-        })
-        
+
+        order_data = db_result.data
+        total_amount = order_data.total_amount
+
+        # Update order status to confirmed
+        update_result = await db.update_order_status(order_id, "confirmed")
+
+        if not update_result.success:
+            logger.error(f"Failed to update order status: {update_result.error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to confirm order: {update_result.error}"
+            )
+
         # Generate confirmation message
         confirmation_message = f"Order confirmed! Your order will be delivered in 30-45 minutes. Total: ₹{total_amount:.2f}"
-        
-        logger.info(f"Order confirmed: {order_id}")
-        
+
+        logger.info(f"Order {order_id} confirmed in DynamoDB")
+
         return OrderConfirmResponse(
             success=True,
             order_id=order_id,
@@ -1499,10 +1491,35 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
                 order.payment_id = payment_id
                 order.payment_created_at = datetime.utcnow()
                 order.payment_gateway_response = json.dumps(cod_result.get("gateway_response", {}))
-        
-        # For now, we'll simulate saving to database
-        # In production, this would be: db.add(order); db.commit()
-        
+
+        # Save order to DynamoDB
+        order_data_obj = OrderData(
+            order_id=order_id,
+            customer_phone=order_data.customer_phone,
+            store_id=order_data.store_id,
+            items=[item.dict() for item in order_data.items],
+            total_amount=float(total_amount),
+            status=OrderStatus.PENDING.value,
+            channel=order_data.channel,
+            language=order_data.language,
+            intent="checkout",  # Marketplace checkout intent
+            confidence=1.0,  # Direct checkout has 100% confidence
+            entities=[],  # No NLP entities for direct checkout
+            created_at=order.created_at.isoformat(),
+            updated_at=order.updated_at.isoformat()
+        )
+
+        db_result = await db.create_order(order_data_obj)
+
+        if not db_result.success:
+            logger.error(f"Failed to save order to database: {db_result.error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Order creation failed: {db_result.error}"
+            )
+
+        logger.info(f"Order {order_id} saved to DynamoDB in {db_result.processing_time_ms}ms")
+
         return {
             "success": True,
             "order_id": order_id,
@@ -1560,41 +1577,48 @@ async def confirm_order_payment(order_id: str, payment_data: PaymentConfirmation
 @router.get("/{order_id}")
 async def get_order_details(order_id: str):
     """Get order details by ID"""
-    
+
     try:
-        # In production, this would query the database
-        # order = db.query(Order).filter(Order.id == order_id).first()
-        # if not order:
-        #     raise HTTPException(status_code=404, detail="Order not found")
-        
-        # For now, return mock data
-        mock_order = {
-            "id": order_id,
-            "store_id": "STORE-001",
-            "customer_name": "Test Customer",
-            "customer_phone": "+919876543210",
-            "delivery_address": "123 Test Street, Mumbai",
-            "items": json.dumps([
-                {"product_name": "Rice", "quantity": 2, "unit_price": 50, "total_price": 100}
-            ]),
-            "subtotal": 100.0,
-            "tax_amount": 5.0,
-            "delivery_fee": 20.0,
-            "total_amount": 125.0,
-            "status": "pending",
-            "payment_id": f"pay_{order_id}",
-            "payment_status": "pending",
-            "payment_method": "upi",
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+        # Get order from DynamoDB
+        db_result = await db.get_order(order_id)
+
+        if not db_result.success:
+            if "not found" in str(db_result.error).lower():
+                raise HTTPException(status_code=404, detail="Order not found")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to retrieve order: {db_result.error}"
+            )
+
+        # Extract order data from result
+        order_data = db_result.data
+
+        logger.info(f"Order {order_id} retrieved from DynamoDB in {db_result.processing_time_ms}ms")
+
+        # Convert OrderData to response format
+        order_response = {
+            "id": order_data.order_id,
+            "store_id": order_data.store_id,
+            "customer_phone": order_data.customer_phone,
+            "items": order_data.items,
+            "total_amount": order_data.total_amount,
+            "status": order_data.status,
+            "channel": order_data.channel,
+            "language": order_data.language,
+            "created_at": order_data.created_at,
+            "updated_at": order_data.updated_at
         }
-        
+
         return {
             "success": True,
-            "order": mock_order
+            "order": order_response,
+            "processing_time_ms": db_result.processing_time_ms
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Failed to get order details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get order details: {str(e)}")
 
 @router.put("/{order_id}/status")
@@ -1607,20 +1631,26 @@ async def update_order_status(order_id: str, status_data: UpdateOrderStatusReque
             new_status = OrderStatus(status_data.status)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid order status")
-        
-        # In production, this would update the database
-        # order = db.query(Order).filter(Order.id == order_id).first()
-        # if not order:
-        #     raise HTTPException(status_code=404, detail="Order not found")
-        # order.status = new_status
-        # order.updated_at = datetime.utcnow()
-        # db.commit()
-        
+
+        # Update order status in DynamoDB
+        update_result = await db.update_order_status(order_id, new_status.value)
+
+        if not update_result.success:
+            if "not found" in str(update_result.error).lower():
+                raise HTTPException(status_code=404, detail="Order not found")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update order status: {update_result.error}"
+            )
+
+        logger.info(f"Order {order_id} status updated to {new_status.value} in DynamoDB")
+
         return {
             "success": True,
             "order_id": order_id,
             "status": new_status.value,
-            "message": "Order status updated successfully"
+            "message": "Order status updated successfully",
+            "processing_time_ms": update_result.processing_time_ms
         }
         
     except Exception as e:
