@@ -21,6 +21,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from middleware.rate_limit import rate_limit_dependency
 from app.services.payment_service import PaymentService
+from app.services.inventory_service import inventory_service
 from app.models.order import Order, OrderStatus, PaymentStatus, PaymentMethod
 from app.database.hybrid_db import HybridDatabase, OrderData, HybridOrderResult
 
@@ -1414,8 +1415,51 @@ async def generate_test_order(request: TestOrderRequest):
 @router.post("/")
 async def create_order_with_payment(order_data: CreateOrderRequest):
     """Create order with payment integration"""
-    
+
     try:
+        # Validate required fields
+        if not order_data.store_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "store_id is required"}
+            )
+
+        if not order_data.items or len(order_data.items) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Order must contain at least one item"}
+            )
+
+        # Check stock availability for all items BEFORE creating order
+        logger.info(f"Checking inventory availability for {len(order_data.items)} items in store {order_data.store_id}")
+
+        for item in order_data.items:
+            availability = await inventory_service.check_availability(
+                store_id=order_data.store_id,
+                product_id=item.product_id,
+                required_quantity=int(item.quantity)
+            )
+
+            if not availability.get('available', False):
+                logger.warning(
+                    f"Insufficient stock for {item.product_id}: "
+                    f"requested={item.quantity}, available={availability.get('current_stock', 0)}"
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Insufficient stock",
+                        "message": f"Cannot fulfill order. {item.product_name or item.product_id} has only {availability.get('current_stock', 0)} units available.",
+                        "product_id": item.product_id,
+                        "product_name": item.product_name,
+                        "requested": item.quantity,
+                        "available": availability.get('current_stock', 0),
+                        "shortage": availability.get('shortage', item.quantity)
+                    }
+                )
+
+        logger.info("Stock availability confirmed for all items")
+
         # Generate order ID
         order_id = f"ORD{uuid.uuid4().hex[:8].upper()}"
         
@@ -1528,6 +1572,32 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
             )
 
         logger.info(f"Order {order_id} saved to DynamoDB in {db_result.processing_time_ms}ms")
+
+        # Reduce inventory for each item AFTER successful order creation
+        logger.info(f"Reducing inventory for order {order_id}")
+
+        for item in order_data.items:
+            stock_update = await inventory_service.update_stock(
+                store_id=order_data.store_id,
+                product_id=item.product_id,
+                quantity_change=-int(item.quantity),  # Negative to reduce stock
+                reason=f"Order {order_id}"
+            )
+
+            if stock_update.get('success'):
+                logger.info(
+                    f"Stock reduced for {item.product_id}: -{item.quantity} units "
+                    f"(was {stock_update.get('previous_stock')}, now {stock_update.get('new_stock')})"
+                )
+            else:
+                # Log error but don't fail the order (it's already created)
+                logger.error(
+                    f"Failed to reduce stock for {item.product_id}: "
+                    f"{stock_update.get('error', 'Unknown error')}"
+                )
+                # Note: Order is already created; consider adding to retry queue for manual review
+
+        logger.info(f"Inventory update complete for order {order_id}")
 
         return {
             "success": True,
