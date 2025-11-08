@@ -4,10 +4,10 @@ from typing import Optional, List, Dict, Any
 from decimal import Decimal
 import json
 
-from app.services.inventory_service import InventoryService
+from app.services.inventory_service import inventory_service
 
-router = APIRouter()
-inventory_service = InventoryService()
+router = APIRouter(prefix="/inventory", tags=["inventory"])
+
 
 class ProductCreate(BaseModel):
     name: str
@@ -29,6 +29,7 @@ class ProductCreate(BaseModel):
     supplier_email: Optional[str] = None
     is_featured: bool = False
 
+
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
@@ -49,18 +50,19 @@ class ProductUpdate(BaseModel):
     is_featured: Optional[bool] = None
     status: Optional[str] = None
 
+
 class StockUpdate(BaseModel):
-    quantity: int
-    movement_type: str  # "in", "out", "set", "adjustment"
+    quantity_change: int  # Positive for add, negative for subtract
     reason: Optional[str] = None
-    reference_id: Optional[str] = None
-    reference_type: Optional[str] = None
+
 
 class BulkStockUpdate(BaseModel):
     updates: List[Dict[str, Any]]
 
+
 @router.get("/products")
 async def list_products(
+    store_id: str = Query(..., description="Store ID"),
     category: Optional[str] = None,
     status: Optional[str] = None,
     search: Optional[str] = None,
@@ -68,10 +70,17 @@ async def list_products(
     limit: int = Query(50, ge=1, le=100)
 ):
     """List products with filtering and pagination"""
-    
+
     try:
-        result = inventory_service.get_all_products(category, status, search, page, limit)
-        
+        result = await inventory_service.get_products(
+            store_id=store_id,
+            category=category,
+            status=status,
+            search=search,
+            page=page,
+            limit=limit
+        )
+
         return {
             "success": True,
             **result
@@ -79,16 +88,17 @@ async def list_products(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get products: {str(e)}")
 
-@router.get("/products/{product_id}")
-async def get_product(product_id: str):
-    """Get product by ID"""
-    
+
+@router.get("/products/{store_id}/{product_id}")
+async def get_product(store_id: str, product_id: str):
+    """Get product by ID for a specific store"""
+
     try:
-        product = inventory_service.get_product_by_id(product_id)
-        
+        product = await inventory_service.get_product(store_id, product_id)
+
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        
+
         return {
             "success": True,
             "product": product
@@ -98,71 +108,56 @@ async def get_product(product_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get product: {str(e)}")
 
-@router.post("/products")
-async def create_product(product_data: ProductCreate):
-    """Create new product"""
-    
-    try:
-        result = inventory_service.create_product(product_data.dict())
-        
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result["error"])
-        
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Product creation failed: {str(e)}")
 
-@router.put("/products/{product_id}")
-async def update_product(product_id: str, update_data: ProductUpdate):
-    """Update product details"""
-    
-    try:
-        # Filter out None values
-        update_dict = {k: v for k, v in update_data.dict().items() if v is not None}
-        
-        result = inventory_service.update_product(product_id, update_dict)
-        
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result["error"])
-        
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Product update failed: {str(e)}")
+@router.get("/search")
+async def search_products(
+    store_id: str = Query(..., description="Store ID"),
+    q: str = Query(..., min_length=1, description="Search term"),
+    limit: int = Query(50, ge=1, le=100)
+):
+    """Search products by name"""
 
-@router.put("/products/{product_id}/stock")
-async def update_stock(product_id: str, stock_update: StockUpdate):
+    try:
+        products = await inventory_service.search_products(store_id, q, limit)
+
+        return {
+            "success": True,
+            "products": products,
+            "count": len(products)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.put("/products/{store_id}/{product_id}/stock")
+async def update_stock(store_id: str, product_id: str, stock_update: StockUpdate):
     """Update product stock levels"""
-    
+
     try:
-        result = inventory_service.update_stock(
-            product_id,
-            stock_update.quantity,
-            stock_update.movement_type,
-            stock_update.reason,
-            stock_update.reference_id,
-            stock_update.reference_type
+        result = await inventory_service.update_stock(
+            store_id=store_id,
+            product_id=product_id,
+            quantity_change=stock_update.quantity_change,
+            reason=stock_update.reason
         )
-        
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result["error"])
-        
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Stock update failed"))
+
         return result
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stock update failed: {str(e)}")
 
-@router.get("/products/{product_id}/availability/{quantity}")
-async def check_availability(product_id: str, quantity: int):
+
+@router.get("/products/{store_id}/{product_id}/availability")
+async def check_availability(store_id: str, product_id: str, quantity: int = Query(..., ge=1)):
     """Check product availability for given quantity"""
-    
+
     try:
-        result = inventory_service.check_availability(product_id, quantity)
-        
+        result = await inventory_service.check_availability(store_id, product_id, quantity)
+
         return {
             "success": True,
             **result
@@ -170,13 +165,17 @@ async def check_availability(product_id: str, quantity: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Availability check failed: {str(e)}")
 
-@router.get("/products/low-stock")
-async def get_low_stock_products():
+
+@router.get("/low-stock")
+async def get_low_stock_products(
+    store_id: str = Query(..., description="Store ID"),
+    threshold: Optional[int] = None
+):
     """Get products with low stock levels"""
-    
+
     try:
-        products = inventory_service.get_low_stock_products()
-        
+        products = await inventory_service.get_low_stock_products(store_id, threshold)
+
         return {
             "success": True,
             "low_stock_products": products,
@@ -185,44 +184,34 @@ async def get_low_stock_products():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get low stock products: {str(e)}")
 
-@router.get("/products/{product_id}/stock-history")
-async def get_stock_history(product_id: str, limit: int = Query(50, ge=1, le=100)):
-    """Get stock movement history"""
-    
+
+@router.get("/barcode/{barcode}")
+async def get_product_by_barcode(barcode: str):
+    """Search product by barcode in global catalog"""
+
     try:
-        movements = inventory_service.get_stock_history(product_id, limit)
-        
+        product = await inventory_service.get_product_by_barcode(barcode)
+
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found with this barcode")
+
         return {
             "success": True,
-            "stock_history": movements,
-            "count": len(movements)
+            "product": product
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get stock history: {str(e)}")
-
-@router.post("/products/bulk-stock-update")
-async def bulk_update_stock(bulk_update: BulkStockUpdate):
-    """Bulk update stock for multiple products"""
-    
-    try:
-        result = inventory_service.bulk_update_stock(bulk_update.updates)
-        
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result["error"])
-        
-        return result
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Bulk stock update failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Barcode search failed: {str(e)}")
 
-@router.get("/inventory/summary")
-async def get_inventory_summary():
+
+@router.get("/summary")
+async def get_inventory_summary(store_id: str = Query(..., description="Store ID")):
     """Get inventory summary statistics"""
-    
+
     try:
-        summary = inventory_service.get_inventory_summary()
-        
+        summary = await inventory_service.get_inventory_summary(store_id)
+
         return {
             "success": True,
             "summary": summary
@@ -230,23 +219,26 @@ async def get_inventory_summary():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get inventory summary: {str(e)}")
 
-@router.get("/products/categories")
+
+@router.get("/categories")
 async def get_product_categories():
     """Get all product categories"""
-    
+
     try:
-        # Mock categories for now
+        # These are common categories - could be pulled from DynamoDB in future
         categories = [
-            {"id": "cat_001", "name": "Grains", "description": "Rice, wheat, flour"},
-            {"id": "cat_002", "name": "Essentials", "description": "Oil, sugar, salt"},
-            {"id": "cat_003", "name": "Dairy", "description": "Milk, curd, butter"},
+            {"id": "cat_001", "name": "Grains & Cereals", "description": "Rice, wheat, flour"},
+            {"id": "cat_002", "name": "Cooking Essentials", "description": "Oil, sugar, salt, spices"},
+            {"id": "cat_003", "name": "Dairy & Eggs", "description": "Milk, curd, butter, eggs"},
             {"id": "cat_004", "name": "Vegetables", "description": "Fresh vegetables"},
             {"id": "cat_005", "name": "Fruits", "description": "Fresh fruits"},
             {"id": "cat_006", "name": "Beverages", "description": "Tea, coffee, juices"},
-            {"id": "cat_007", "name": "Snacks", "description": "Chips, biscuits, namkeen"},
-            {"id": "cat_008", "name": "Personal Care", "description": "Soap, shampoo, toothpaste"}
+            {"id": "cat_007", "name": "Snacks & Biscuits", "description": "Chips, biscuits, namkeen"},
+            {"id": "cat_008", "name": "Personal Care", "description": "Soap, shampoo, toothpaste"},
+            {"id": "cat_009", "name": "Spices & Condiments", "description": "Spices, masalas, condiments"},
+            {"id": "cat_010", "name": "Household", "description": "Cleaning supplies, kitchen items"}
         ]
-        
+
         return {
             "success": True,
             "categories": categories,
@@ -255,24 +247,27 @@ async def get_product_categories():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get categories: {str(e)}")
 
-@router.get("/products/units")
+
+@router.get("/units")
 async def get_product_units():
     """Get available product units"""
-    
+
     try:
         units = [
             {"value": "kg", "label": "Kilogram"},
-            {"value": "gram", "label": "Gram"},
+            {"value": "g", "label": "Gram"},
             {"value": "liter", "label": "Liter"},
             {"value": "ml", "label": "Milliliter"},
             {"value": "piece", "label": "Piece"},
+            {"value": "pieces", "label": "Pieces"},
             {"value": "packet", "label": "Packet"},
+            {"value": "pack", "label": "Pack"},
             {"value": "box", "label": "Box"},
             {"value": "dozen", "label": "Dozen"},
             {"value": "bottle", "label": "Bottle"},
             {"value": "can", "label": "Can"}
         ]
-        
+
         return {
             "success": True,
             "units": units,
@@ -280,42 +275,3 @@ async def get_product_units():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get units: {str(e)}")
-
-@router.delete("/products/{product_id}")
-async def delete_product(product_id: str):
-    """Delete product (soft delete by setting status to inactive)"""
-    
-    try:
-        result = inventory_service.update_product(product_id, {"status": "inactive"})
-        
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result["error"])
-        
-        return {
-            "success": True,
-            "message": "Product deleted successfully"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Product deletion failed: {str(e)}")
-
-@router.post("/products/{product_id}/restore")
-async def restore_product(product_id: str):
-    """Restore inactive product"""
-    
-    try:
-        result = inventory_service.update_product(product_id, {"status": "active"})
-        
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result["error"])
-        
-        return {
-            "success": True,
-            "message": "Product restored successfully"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Product restoration failed: {str(e)}")
-
