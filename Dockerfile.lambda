@@ -1,0 +1,54 @@
+# AWS Lambda Container Image for VyaparAI
+# Based on AWS Lambda Python 3.11 runtime
+
+FROM public.ecr.aws/lambda/python:3.11
+
+# Set working directory
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+# Install system dependencies
+RUN yum update -y && \
+    yum install -y \
+    gcc \
+    gcc-c++ \
+    make \
+    openssl-devel \
+    bzip2-devel \
+    libffi-devel \
+    zlib-devel \
+    && yum clean all
+
+# Copy requirements files
+COPY requirements.txt .
+COPY pyproject.toml .
+COPY poetry.lock .
+
+# Install Python dependencies using pip (faster for Lambda)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app/ ./app/
+COPY layer/ ./layer/
+
+# Create necessary directories
+RUN mkdir -p /tmp/vyaparai/logs
+RUN mkdir -p /tmp/vyaparai/cache
+
+# Set environment variables
+ENV PYTHONPATH="${LAMBDA_TASK_ROOT}"
+ENV LAMBDA_TASK_ROOT="${LAMBDA_TASK_ROOT}"
+ENV AWS_LAMBDA_FUNCTION_MEMORY_SIZE="1024"
+ENV AWS_LAMBDA_FUNCTION_TIMEOUT="30"
+
+# Set Lambda handler
+CMD ["app.main.handler"]
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:9001/2018-06-01/runtime/invocation/next || exit 1
+
+# Labels
+LABEL maintainer="VyaparAI Team <dev@vyaparai.com>"
+LABEL version="1.0.0"
+LABEL description="VyaparAI Lambda Container for Order Processing"
+LABEL org.opencontainers.image.source="https://github.com/vyaparai/vyaparai-api"

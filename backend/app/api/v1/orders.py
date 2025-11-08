@@ -1,0 +1,1690 @@
+"""
+FastAPI REST endpoints for VyaparAI Order Processing Service
+Provides comprehensive API for order processing across all channels and languages
+"""
+
+import uuid
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Literal
+from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+import asyncio
+from decimal import Decimal
+
+# Local imports
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+from services.unified_order_service import unified_order_service, OrderProcessingResult
+from middleware.rate_limit import rate_limit_dependency
+from app.services.payment_service import PaymentService
+from app.models.order import Order, OrderStatus, PaymentStatus, PaymentMethod
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Create router
+router = APIRouter(prefix="/orders", tags=["orders"])
+payment_service = PaymentService()
+
+# In-memory storage for demo (replace with database in production)
+orders_db = {}
+customer_orders = {}
+
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
+
+class ProcessOrderRequest(BaseModel):
+    """Request model for order processing"""
+    message: str = Field(..., min_length=1, description="Order message in any Indian language")
+    session_id: Optional[str] = Field(None, description="Session identifier for tracking")
+    channel: Literal["whatsapp", "rcs", "sms", "web"] = Field("whatsapp", description="Communication channel")
+    store_id: Optional[str] = Field(None, description="Store identifier")
+    customer_phone: Optional[str] = Field(None, description="Customer phone number")
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional metadata")
+    
+    @validator('message')
+    def validate_message(cls, v):
+        if not v.strip():
+            raise ValueError('Message cannot be empty')
+        return v.strip()
+    
+    @validator('customer_phone')
+    def validate_phone(cls, v):
+        if v and not v.startswith('+91'):
+            v = '+91' + v
+        return v
+
+class ProcessOrderResponse(BaseModel):
+    """Response model for order processing"""
+    success: bool = Field(..., description="Processing success status")
+    order_id: str = Field(..., description="Unique order identifier")
+    response: str = Field(..., description="Generated response message")
+    intent: str = Field(..., description="Detected intent")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Intent confidence score")
+    entities: List[Dict[str, Any]] = Field(..., description="Extracted entities")
+    language: str = Field(..., description="Detected language")
+    processing_time_ms: float = Field(..., description="Processing time in milliseconds")
+    channel_format: Dict[str, Any] = Field(..., description="Channel-specific formatted response")
+    timestamp: datetime = Field(..., description="Processing timestamp")
+    original_text: str = Field(..., description="Original input text")
+    translated_text: Optional[str] = Field(None, description="Translated text (if applicable)")
+    gemini_used: bool = Field(..., description="Whether Gemini was used for response generation")
+    error_occurred: bool = Field(..., description="Whether an error occurred during processing")
+    error_message: Optional[str] = Field(None, description="Error message if any")
+
+class OrderConfirmRequest(BaseModel):
+    """Request model for order confirmation"""
+    order_id: str = Field(..., description="Order identifier to confirm")
+    customer_details: Dict[str, Any] = Field(..., description="Customer information")
+    delivery_address: Optional[str] = Field(None, description="Delivery address")
+    payment_method: Literal["cod", "upi", "card"] = Field("cod", description="Payment method")
+    special_instructions: Optional[str] = Field(None, description="Special delivery instructions")
+
+class OrderConfirmResponse(BaseModel):
+    """Response model for order confirmation"""
+    success: bool = Field(..., description="Confirmation success status")
+    order_id: str = Field(..., description="Order identifier")
+    order_status: str = Field(..., description="Updated order status")
+    estimated_delivery: str = Field(..., description="Estimated delivery time")
+    total_amount: float = Field(..., description="Total order amount")
+    confirmation_message: str = Field(..., description="Confirmation message for customer")
+
+class OrderStatusResponse(BaseModel):
+    """Response model for order status"""
+    order_id: str = Field(..., description="Order identifier")
+    status: str = Field(..., description="Current order status")
+    created_at: datetime = Field(..., description="Order creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    customer_phone: Optional[str] = Field(None, description="Customer phone number")
+    store_id: Optional[str] = Field(None, description="Store identifier")
+    intent: str = Field(..., description="Original intent")
+    entities: List[Dict[str, Any]] = Field(..., description="Order entities")
+    total_amount: Optional[float] = Field(None, description="Order total amount")
+    delivery_address: Optional[str] = Field(None, description="Delivery address")
+    payment_method: Optional[str] = Field(None, description="Payment method")
+
+class OrderHistoryResponse(BaseModel):
+    """Response model for order history"""
+    customer_phone: str = Field(..., description="Customer phone number")
+    orders: List[OrderStatusResponse] = Field(..., description="List of orders")
+    total_orders: int = Field(..., description="Total number of orders")
+    page: int = Field(..., description="Current page number")
+    page_size: int = Field(..., description="Page size")
+    has_next: bool = Field(..., description="Whether there are more pages")
+
+class WebhookResponse(BaseModel):
+    """Response model for webhook endpoints"""
+    status: str = Field(..., description="Processing status")
+    message: str = Field(..., description="Status message")
+    data: Optional[Dict[str, Any]] = Field(None, description="Additional data")
+
+class OrderItemRequest(BaseModel):
+    product_id: Optional[str] = None
+    product_name: str
+    name: Optional[str] = None
+    quantity: float = 1.0
+    unit: str = "pieces"
+    unit_price: float
+    notes: Optional[str] = None
+
+class CreateOrderRequest(BaseModel):
+    store_id: str = "STORE-001"
+    customer_name: str
+    customer_phone: str
+    customer_email: Optional[str] = None
+    delivery_address: str
+    items: List[OrderItemRequest]
+    payment_method: str = "upi"  # upi, card, cod, wallet
+    delivery_notes: Optional[str] = None
+    is_urgent: bool = False
+    channel: str = "web"
+    language: str = "en"
+
+class UpdateOrderStatusRequest(BaseModel):
+    status: str
+    notes: Optional[str] = None
+
+class PaymentConfirmationRequest(BaseModel):
+    payment_id: str
+    razorpay_payment_id: Optional[str] = None
+    razorpay_signature: Optional[str] = None
+    payment_status: str = "completed"
+
+# =============================================================================
+# CHANNEL FORMATTERS
+# =============================================================================
+
+def format_whatsapp_response(text: str, phone: str, order_id: str) -> Dict[str, Any]:
+    """Format response for WhatsApp Cloud API"""
+    return {
+        "messaging_product": "whatsapp",
+        "to": phone,
+        "type": "text",
+        "text": {
+            "body": text
+        },
+        "context": {
+            "message_id": order_id
+        }
+    }
+
+def format_rcs_response(text: str, suggestions: List[Dict[str, str]], order_id: str) -> Dict[str, Any]:
+    """Format response for Google RCS"""
+    return {
+        "messageId": order_id,
+        "text": text,
+        "suggestions": suggestions,
+        "richCard": {
+            "title": "VyaparAI Order",
+            "description": text,
+            "media": {
+                "height": "MEDIUM_HEIGHT",
+                "contentInfo": {
+                    "fileUrl": "https://vyaparai.com/logo.png",
+                    "forceRefresh": False
+                }
+            }
+        }
+    }
+
+def format_sms_response(text: str) -> List[str]:
+    """Format response for SMS (split into 160-char segments)"""
+    segments = []
+    while text:
+        if len(text) <= 160:
+            segments.append(text)
+            break
+        else:
+            # Find last space within 160 characters
+            cut_point = text.rfind(' ', 0, 160)
+            if cut_point == -1:
+                cut_point = 159
+            segments.append(text[:cut_point])
+            text = text[cut_point:].lstrip()
+    return segments
+
+# =============================================================================
+# MAIN ENDPOINTS
+# =============================================================================
+
+@router.post("/process", response_model=ProcessOrderResponse, status_code=status.HTTP_200_OK)
+async def process_order(
+    request: ProcessOrderRequest,
+    rate_limit: bool = Depends(rate_limit_dependency)
+):
+    """
+    Process order message in any Indian language
+    
+    - **message**: Order message in any supported language
+    - **channel**: Communication channel (whatsapp/rcs/sms/web)
+    - **store_id**: Optional store identifier
+    - **customer_phone**: Customer phone number for tracking
+    
+    Returns processed order with intent, entities, and formatted response.
+    """
+    try:
+        # Generate unique order ID
+        order_id = str(uuid.uuid4())
+        
+        # Process order using unified service
+        result = await unified_order_service.process_order(
+            message=request.message,
+            session_id=request.session_id or order_id,
+            channel=request.channel,
+            store_id=request.store_id
+        )
+        
+        # Format response based on channel
+        channel_format = {}
+        if request.channel == "whatsapp" and request.customer_phone:
+            channel_format = format_whatsapp_response(
+                result.response, 
+                request.customer_phone, 
+                order_id
+            )
+        elif request.channel == "rcs":
+            suggestions = unified_order_service._get_rcs_suggestions(result.intent)
+            channel_format = format_rcs_response(
+                result.response, 
+                suggestions, 
+                order_id
+            )
+        elif request.channel == "sms":
+            segments = format_sms_response(result.response)
+            channel_format = {"segments": segments, "total_segments": len(segments)}
+        else:
+            channel_format = {"text": result.response}
+        
+        # Store order in database (in-memory for demo)
+        order_data = {
+            "order_id": order_id,
+            "status": "processed",
+            "created_at": datetime.now(),
+            "updated_at": datetime.now(),
+            "customer_phone": request.customer_phone,
+            "store_id": request.store_id,
+            "intent": result.intent,
+            "entities": result.entities,
+            "language": result.language,
+            "original_text": result.original_text,
+            "response": result.response,
+            "metadata": request.metadata
+        }
+        orders_db[order_id] = order_data
+        
+        # Track customer orders
+        if request.customer_phone:
+            if request.customer_phone not in customer_orders:
+                customer_orders[request.customer_phone] = []
+            customer_orders[request.customer_phone].append(order_id)
+        
+        logger.info(f"Order processed successfully: {order_id}")
+        
+        return ProcessOrderResponse(
+            success=True,
+            order_id=order_id,
+            response=result.response,
+            intent=result.intent,
+            confidence=result.confidence,
+            entities=result.entities,
+            language=result.language,
+            processing_time_ms=result.processing_time_ms,
+            channel_format=channel_format,
+            timestamp=datetime.now(),
+            original_text=result.original_text,
+            translated_text=result.translated_text,
+            gemini_used=result.gemini_used,
+            error_occurred=result.error_occurred,
+            error_message=result.error_message
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing order: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process order: {str(e)}"
+        )
+
+@router.post("/confirm/{order_id}", response_model=OrderConfirmResponse, status_code=status.HTTP_200_OK)
+async def confirm_order(
+    order_id: str,
+    request: OrderConfirmRequest,
+    rate_limit: bool = Depends(rate_limit_dependency)
+):
+    """
+    Confirm an order with customer details
+    
+    - **order_id**: Order identifier to confirm
+    - **customer_details**: Customer information
+    - **delivery_address**: Delivery address
+    - **payment_method**: Payment method (cod/upi/card)
+    
+    Returns confirmation details and estimated delivery time.
+    """
+    try:
+        # Check if order exists
+        if order_id not in orders_db:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found"
+            )
+        
+        order = orders_db[order_id]
+        
+        # Calculate total amount from entities
+        total_amount = 0.0
+        for entity in order["entities"]:
+            product = entity.get("product", "")
+            quantity = entity.get("quantity", 0)
+            
+            # Simplified pricing (replace with actual pricing logic)
+            base_prices = {
+                "rice": 50, "flour": 40, "oil": 120, "milk": 60,
+                "bread": 30, "noodles": 15, "biscuits": 20, "tea": 50,
+                "coffee": 100, "sugar": 45, "salt": 20
+            }
+            price_per_unit = base_prices.get(product, 30)
+            total_amount += quantity * price_per_unit
+        
+        # Update order with confirmation details
+        order.update({
+            "status": "confirmed",
+            "updated_at": datetime.now(),
+            "customer_details": request.customer_details,
+            "delivery_address": request.delivery_address,
+            "payment_method": request.payment_method,
+            "total_amount": total_amount,
+            "special_instructions": request.special_instructions
+        })
+        
+        # Generate confirmation message
+        confirmation_message = f"Order confirmed! Your order will be delivered in 30-45 minutes. Total: ₹{total_amount:.2f}"
+        
+        logger.info(f"Order confirmed: {order_id}")
+        
+        return OrderConfirmResponse(
+            success=True,
+            order_id=order_id,
+            order_status="confirmed",
+            estimated_delivery="30-45 minutes",
+            total_amount=total_amount,
+            confirmation_message=confirmation_message
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error confirming order: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to confirm order: {str(e)}"
+        )
+
+# =============================================================================
+# ORDER HISTORY & ANALYTICS ENDPOINTS
+# =============================================================================
+
+from app.core.cache import cache_result, invalidate_orders_cache
+
+@router.get("/history", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+@cache_result(expiry=300, key_prefix="orders")  # Cache for 5 minutes
+async def get_order_history(
+    store_id: str = Query(..., description="Store identifier"),
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
+    status: Optional[str] = Query(None, description="Filter by order status"),
+    payment_method: Optional[str] = Query(None, description="Filter by payment method"),
+    search: Optional[str] = Query(None, description="Search in order ID, customer name, or phone"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    sort_by: str = Query("created_at", description="Sort field"),
+    sort_order: str = Query("desc", description="Sort order (asc/desc)")
+):
+    """
+    Get paginated order history with advanced filtering
+    
+    Supports filtering by date range, status, payment method, and search terms.
+    Returns paginated results with total count.
+    """
+    try:
+        # Filter orders by store
+        store_orders = {k: v for k, v in orders_db.items() if v.get("store_id") == store_id}
+        
+        # Apply filters
+        filtered_orders = []
+        for order_id, order in store_orders.items():
+            # Date filter
+            if start_date:
+                order_date = order.get("created_at")
+                if isinstance(order_date, str):
+                    order_date = datetime.fromisoformat(order_date.replace('Z', '+00:00'))
+                if order_date < datetime.fromisoformat(start_date):
+                    continue
+            
+            if end_date:
+                order_date = order.get("created_at")
+                if isinstance(order_date, str):
+                    order_date = datetime.fromisoformat(order_date.replace('Z', '+00:00'))
+                if order_date > datetime.fromisoformat(end_date):
+                    continue
+            
+            # Status filter
+            if status and order.get("status") != status:
+                continue
+            
+            # Payment method filter
+            if payment_method and order.get("payment_method") != payment_method:
+                continue
+            
+            # Search filter
+            if search:
+                search_lower = search.lower()
+                order_id_match = order_id.lower().find(search_lower) != -1
+                customer_phone_match = order.get("customer_phone", "").lower().find(search_lower) != -1
+                if not (order_id_match or customer_phone_match):
+                    continue
+            
+            filtered_orders.append((order_id, order))
+        
+        # Sort orders
+        reverse = sort_order.lower() == "desc"
+        if sort_by == "total_amount":
+            filtered_orders.sort(key=lambda x: x[1].get("total_amount", 0), reverse=reverse)
+        elif sort_by == "created_at":
+            filtered_orders.sort(key=lambda x: x[1].get("created_at"), reverse=reverse)
+        else:
+            filtered_orders.sort(key=lambda x: x[0], reverse=reverse)
+        
+        # Paginate
+        total_count = len(filtered_orders)
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        page_orders = filtered_orders[start_idx:end_idx]
+        
+        # Format response
+        orders = []
+        for order_id, order in page_orders:
+            orders.append({
+                "order_id": order_id,
+                "customer_phone": order.get("customer_phone"),
+                "status": order.get("status"),
+                "total_amount": order.get("total_amount"),
+                "payment_method": order.get("payment_method"),
+                "created_at": order.get("created_at"),
+                "updated_at": order.get("updated_at"),
+                "items": order.get("entities", {}).get("items", [])
+            })
+        
+        return {
+            "orders": orders,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total_count,
+                "pages": (total_count + limit - 1) // limit
+            },
+            "filters": {
+                "start_date": start_date,
+                "end_date": end_date,
+                "status": status,
+                "payment_method": payment_method,
+                "search": search
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting order history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get order history: {str(e)}"
+        )
+
+@router.get("/export", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def export_orders(
+    store_id: str = Query(..., description="Store identifier"),
+    format: str = Query("csv", description="Export format (csv/pdf)"),
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)")
+):
+    """
+    Export orders to CSV or PDF format
+    
+    Supports filtering by date range and exports in the specified format.
+    """
+    try:
+        # Get filtered orders (reuse history logic)
+        store_orders = {k: v for k, v in orders_db.items() if v.get("store_id") == store_id}
+        
+        filtered_orders = []
+        for order_id, order in store_orders.items():
+            # Date filter
+            if start_date:
+                order_date = order.get("created_at")
+                if isinstance(order_date, str):
+                    order_date = datetime.fromisoformat(order_date.replace('Z', '+00:00'))
+                if order_date < datetime.fromisoformat(start_date):
+                    continue
+            
+            if end_date:
+                order_date = order.get("created_at")
+                if isinstance(order_date, str):
+                    order_date = datetime.fromisoformat(order_date.replace('Z', '+00:00'))
+                if order_date > datetime.fromisoformat(end_date):
+                    continue
+            
+            filtered_orders.append((order_id, order))
+        
+        if format.lower() == "csv":
+            # Generate CSV
+            csv_data = "Order ID,Customer Phone,Status,Total Amount,Payment Method,Created At\n"
+            for order_id, order in filtered_orders:
+                csv_data += f"{order_id},{order.get('customer_phone', '')},{order.get('status', '')},{order.get('total_amount', 0)},{order.get('payment_method', '')},{order.get('created_at', '')}\n"
+            
+            return {
+                "format": "csv",
+                "data": csv_data,
+                "filename": f"orders_{store_id}_{datetime.now().strftime('%Y%m%d')}.csv",
+                "count": len(filtered_orders)
+            }
+        
+        elif format.lower() == "pdf":
+            # Generate PDF (simplified for now)
+            pdf_data = f"Orders Report for Store {store_id}\n"
+            pdf_data += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            pdf_data += f"Total Orders: {len(filtered_orders)}\n\n"
+            
+            for order_id, order in filtered_orders:
+                pdf_data += f"Order: {order_id}\n"
+                pdf_data += f"Customer: {order.get('customer_phone', '')}\n"
+                pdf_data += f"Status: {order.get('status', '')}\n"
+                pdf_data += f"Amount: ₹{order.get('total_amount', 0)}\n"
+                pdf_data += f"Payment: {order.get('payment_method', '')}\n"
+                pdf_data += f"Created: {order.get('created_at', '')}\n\n"
+            
+            return {
+                "format": "pdf",
+                "data": pdf_data,
+                "filename": f"orders_{store_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                "count": len(filtered_orders)
+            }
+        
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported format. Use 'csv' or 'pdf'"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting orders: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export orders: {str(e)}"
+        )
+
+@router.get("/stats/daily", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_daily_stats(
+    store_id: str = Query(..., description="Store identifier"),
+    date: Optional[str] = Query(None, description="Date (YYYY-MM-DD format)")
+):
+    """
+    Get detailed daily statistics for a store
+    
+    Returns comprehensive metrics including revenue, order counts, and trends.
+    """
+    try:
+        # Use today if no date specified
+        if not date:
+            date = datetime.now().strftime('%Y-%m-%d')
+        
+        target_date = datetime.strptime(date, '%Y-%m-%d')
+        start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = target_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
+        # Filter orders for the day
+        daily_orders = []
+        total_revenue = 0
+        status_counts = {"pending": 0, "confirmed": 0, "completed": 0, "cancelled": 0}
+        payment_methods = {}
+        
+        for order_id, order in orders_db.items():
+            if order.get("store_id") != store_id:
+                continue
+            
+            order_date = order.get("created_at")
+            if isinstance(order_date, str):
+                order_date = datetime.fromisoformat(order_date.replace('Z', '+00:00'))
+            
+            if start_of_day <= order_date <= end_of_day:
+                daily_orders.append(order)
+                total_revenue += order.get("total_amount", 0)
+                
+                status = order.get("status", "pending")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                
+                payment_method = order.get("payment_method", "unknown")
+                payment_methods[payment_method] = payment_methods.get(payment_method, 0) + 1
+        
+        # Calculate additional metrics
+        avg_order_value = total_revenue / len(daily_orders) if daily_orders else 0
+        unique_customers = len(set(order.get("customer_phone") for order in daily_orders))
+        
+        return {
+            "date": date,
+            "store_id": store_id,
+            "summary": {
+                "total_orders": len(daily_orders),
+                "total_revenue": total_revenue,
+                "average_order_value": round(avg_order_value, 2),
+                "unique_customers": unique_customers
+            },
+            "status_breakdown": status_counts,
+            "payment_breakdown": payment_methods,
+            "hourly_breakdown": {
+                # Simplified hourly breakdown
+                "morning": len([o for o in daily_orders if 6 <= datetime.fromisoformat(o.get("created_at").replace('Z', '+00:00')).hour < 12]),
+                "afternoon": len([o for o in daily_orders if 12 <= datetime.fromisoformat(o.get("created_at").replace('Z', '+00:00')).hour < 18]),
+                "evening": len([o for o in daily_orders if 18 <= datetime.fromisoformat(o.get("created_at").replace('Z', '+00:00')).hour < 24]),
+                "night": len([o for o in daily_orders if 0 <= datetime.fromisoformat(o.get("created_at").replace('Z', '+00:00')).hour < 6])
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting daily stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get daily stats: {str(e)}"
+        )
+
+@router.get("/history/customer/{customer_phone}", response_model=OrderHistoryResponse, status_code=status.HTTP_200_OK)
+async def get_customer_order_history(
+    customer_phone: str,
+    page: int = 1,
+    page_size: int = 10
+):
+    """
+    Get customer's order history
+    
+    - **customer_phone**: Customer phone number
+    - **page**: Page number (default: 1)
+    - **page_size**: Page size (default: 10)
+    
+    Returns paginated order history for the customer.
+    """
+    try:
+        # Normalize phone number
+        if not customer_phone.startswith('+91'):
+            customer_phone = '+91' + customer_phone
+        
+        # Get customer orders
+        customer_order_ids = customer_orders.get(customer_phone, [])
+        total_orders = len(customer_order_ids)
+        
+        # Paginate
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_order_ids = customer_order_ids[start_idx:end_idx]
+        
+        # Get order details
+        orders = []
+        for order_id in page_order_ids:
+            if order_id in orders_db:
+                order = orders_db[order_id]
+                orders.append(OrderStatusResponse(
+                    order_id=order_id,
+                    status=order["status"],
+                    created_at=order["created_at"],
+                    updated_at=order["updated_at"],
+                    customer_phone=order.get("customer_phone"),
+                    store_id=order.get("store_id"),
+                    intent=order["intent"],
+                    entities=order["entities"],
+                    total_amount=order.get("total_amount"),
+                    delivery_address=order.get("delivery_address"),
+                    payment_method=order.get("payment_method")
+                ))
+        
+        return OrderHistoryResponse(
+            customer_phone=customer_phone,
+            orders=orders,
+            total_orders=total_orders,
+            page=page,
+            page_size=page_size,
+            has_next=end_idx < total_orders
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting order history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get order history: {str(e)}"
+        )
+
+# =============================================================================
+# INDIVIDUAL ORDER ENDPOINTS
+# =============================================================================
+
+@router.get("/{order_id}", response_model=OrderStatusResponse, status_code=status.HTTP_200_OK)
+async def get_order_status(order_id: str):
+    """
+    Get order details and status
+    
+    - **order_id**: Order identifier
+    
+    Returns complete order information including status and details.
+    """
+    try:
+        if order_id not in orders_db:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found"
+            )
+        
+        order = orders_db[order_id]
+        
+        return OrderStatusResponse(
+            order_id=order_id,
+            status=order["status"],
+            created_at=order["created_at"],
+            updated_at=order["updated_at"],
+            customer_phone=order.get("customer_phone"),
+            store_id=order.get("store_id"),
+            intent=order["intent"],
+            entities=order["entities"],
+            total_amount=order.get("total_amount"),
+            delivery_address=order.get("delivery_address"),
+            payment_method=order.get("payment_method")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting order status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get order status: {str(e)}"
+        )
+
+@router.post("/{order_id}/cancel", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def cancel_order(
+    order_id: str,
+    reason: Optional[str] = None,
+    rate_limit: bool = Depends(rate_limit_dependency)
+):
+    """
+    Cancel an order
+    
+    - **order_id**: Order identifier to cancel
+    - **reason**: Optional cancellation reason
+    
+    Returns cancellation confirmation.
+    """
+    try:
+        if order_id not in orders_db:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found"
+            )
+        
+        order = orders_db[order_id]
+        
+        # Update order status
+        order.update({
+            "status": "cancelled",
+            "updated_at": datetime.now(),
+            "cancellation_reason": reason
+        })
+        
+        logger.info(f"Order cancelled: {order_id}")
+        
+        return {
+            "success": True,
+            "order_id": order_id,
+            "status": "cancelled",
+            "message": "Order cancelled successfully",
+            "cancellation_reason": reason
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling order: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to cancel order: {str(e)}"
+        )
+
+
+
+# =============================================================================
+# WEBHOOK ENDPOINTS
+# =============================================================================
+
+@router.post("/webhooks/whatsapp", response_model=WebhookResponse, status_code=status.HTTP_200_OK)
+async def whatsapp_webhook(request: Request):
+    """
+    WhatsApp Cloud API webhook endpoint
+    
+    Processes incoming WhatsApp messages and returns formatted responses.
+    """
+    try:
+        # Parse WhatsApp webhook payload
+        payload = await request.json()
+        
+        # Extract message details
+        entry = payload.get("entry", [{}])[0]
+        changes = entry.get("changes", [{}])[0]
+        value = changes.get("value", {})
+        messages = value.get("messages", [])
+        
+        if not messages:
+            return WebhookResponse(
+                status="success",
+                message="No messages to process",
+                data=None
+            )
+        
+        message = messages[0]
+        phone_number = message.get("from")
+        message_text = message.get("text", {}).get("body", "")
+        message_id = message.get("id")
+        
+        if not message_text:
+            return WebhookResponse(
+                status="success",
+                message="No text message to process",
+                data=None
+            )
+        
+        # Process message
+        result = await unified_order_service.process_order(
+            message=message_text,
+            session_id=message_id,
+            channel="whatsapp"
+        )
+        
+        # Format WhatsApp response
+        whatsapp_response = format_whatsapp_response(
+            result.response,
+            phone_number,
+            message_id
+        )
+        
+        logger.info(f"WhatsApp webhook processed: {message_id}")
+        
+        return WebhookResponse(
+            status="success",
+            message="Message processed successfully",
+            data=whatsapp_response
+        )
+        
+    except Exception as e:
+        logger.error(f"WhatsApp webhook error: {e}")
+        return WebhookResponse(
+            status="error",
+            message=f"Failed to process message: {str(e)}",
+            data=None
+        )
+
+@router.post("/webhooks/rcs", response_model=WebhookResponse, status_code=status.HTTP_200_OK)
+async def rcs_webhook(request: Request):
+    """
+    Google RCS webhook endpoint
+    
+    Processes incoming RCS messages and returns rich card responses.
+    """
+    try:
+        # Parse RCS webhook payload
+        payload = await request.json()
+        
+        # Extract message details
+        message_text = payload.get("message", {}).get("text", "")
+        user_id = payload.get("user", {}).get("userId", "")
+        message_id = payload.get("messageId", "")
+        
+        if not message_text:
+            return WebhookResponse(
+                status="success",
+                message="No text message to process",
+                data=None
+            )
+        
+        # Process message
+        result = await unified_order_service.process_order(
+            message=message_text,
+            session_id=message_id,
+            channel="rcs"
+        )
+        
+        # Format RCS response
+        suggestions = unified_order_service._get_rcs_suggestions(result.intent)
+        rcs_response = format_rcs_response(
+            result.response,
+            suggestions,
+            message_id
+        )
+        
+        logger.info(f"RCS webhook processed: {message_id}")
+        
+        return WebhookResponse(
+            status="success",
+            message="Message processed successfully",
+            data=rcs_response
+        )
+        
+    except Exception as e:
+        logger.error(f"RCS webhook error: {e}")
+        return WebhookResponse(
+            status="error",
+            message=f"Failed to process message: {str(e)}",
+            data=None
+        )
+
+@router.post("/webhooks/sms", response_model=WebhookResponse, status_code=status.HTTP_200_OK)
+async def sms_webhook(request: Request):
+    """
+    SMS webhook endpoint
+    
+    Processes incoming SMS messages and returns 160-char limited responses.
+    """
+    try:
+        # Parse SMS webhook payload
+        payload = await request.json()
+        
+        # Extract message details
+        message_text = payload.get("message", "")
+        phone_number = payload.get("from", "")
+        message_id = payload.get("id", "")
+        
+        if not message_text:
+            return WebhookResponse(
+                status="success",
+                message="No text message to process",
+                data=None
+            )
+        
+        # Process message
+        result = await unified_order_service.process_order(
+            message=message_text,
+            session_id=message_id,
+            channel="sms"
+        )
+        
+        # Format SMS response
+        sms_segments = format_sms_response(result.response)
+        
+        logger.info(f"SMS webhook processed: {message_id}")
+        
+        return WebhookResponse(
+            status="success",
+            message="Message processed successfully",
+            data={
+                "to": phone_number,
+                "segments": sms_segments,
+                "total_segments": len(sms_segments)
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"SMS webhook error: {e}")
+        return WebhookResponse(
+            status="error",
+            message=f"Failed to process message: {str(e)}",
+            data=None
+        )
+
+# =============================================================================
+# METRICS ENDPOINT
+# =============================================================================
+
+@router.get("/metrics", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_metrics():
+    """
+    Get order processing metrics
+    
+    Returns comprehensive metrics including:
+    - Orders processed today
+    - Language distribution
+    - Intent distribution
+    - Average response time
+    - Error rate
+    """
+    try:
+        # Get unified service metrics
+        service_metrics = unified_order_service.get_metrics()
+        performance_summary = unified_order_service.get_performance_summary()
+        
+        # Calculate today's orders
+        today = datetime.now().date()
+        today_orders = [
+            order for order in orders_db.values()
+            if order["created_at"].date() == today
+        ]
+        
+        # Calculate order status distribution
+        status_distribution = {}
+        for order in orders_db.values():
+            status = order["status"]
+            status_distribution[status] = status_distribution.get(status, 0) + 1
+        
+        metrics = {
+            "orders_today": len(today_orders),
+            "total_orders": len(orders_db),
+            "unique_customers": len(customer_orders),
+            "language_distribution": service_metrics["language_distribution"],
+            "intent_distribution": service_metrics["intent_distribution"],
+            "status_distribution": status_distribution,
+            "performance": {
+                "avg_processing_time_ms": service_metrics["avg_processing_time"],
+                "total_requests": service_metrics["total_requests"],
+                "error_rate": (service_metrics["error_count"] / max(service_metrics["total_requests"], 1)) * 100,
+                "gemini_usage_rate": (service_metrics["gemini_usage"] / max(service_metrics["total_requests"], 1)) * 100,
+                "template_usage_rate": (service_metrics["template_usage"] / max(service_metrics["total_requests"], 1)) * 100
+            },
+            "channel_distribution": service_metrics["channel_distribution"],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return metrics
+        
+    except Exception as e:
+        logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get metrics: {str(e)}"
+        )
+
+# =============================================================================
+# ORDER HISTORY & ANALYTICS ENDPOINTS
+# =============================================================================
+
+@router.get("/history", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_order_history(
+    store_id: str = Query(..., description="Store identifier"),
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
+    status: Optional[str] = Query(None, description="Filter by order status"),
+    payment_method: Optional[str] = Query(None, description="Filter by payment method"),
+    search: Optional[str] = Query(None, description="Search in order ID, customer name, or phone"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    sort_by: str = Query("created_at", description="Sort field"),
+    sort_order: str = Query("desc", description="Sort order (asc/desc)")
+):
+    """
+    Get paginated order history with advanced filtering
+    
+    Supports filtering by date range, status, payment method, and search terms.
+    Returns paginated results with total count.
+    """
+    try:
+        # Parse dates
+        start_dt = None
+        end_dt = None
+        if start_date:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        if end_date:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        
+        # Filter orders
+        filtered_orders = []
+        for order in orders_db.values():
+            if order.get('store_id') != store_id:
+                continue
+                
+            # Date filter
+            if start_dt or end_dt:
+                order_dt = datetime.fromisoformat(order.get('created_at', '').replace('Z', '+00:00'))
+                if start_dt and order_dt < start_dt:
+                    continue
+                if end_dt and order_dt > end_dt:
+                    continue
+            
+            # Status filter
+            if status and order.get('status') != status:
+                continue
+                
+            # Payment method filter
+            if payment_method and order.get('paymentMethod') != payment_method:
+                continue
+                
+            # Search filter
+            if search:
+                search_lower = search.lower()
+                order_id = order.get('id', '').lower()
+                customer_name = order.get('customerName', '').lower()
+                customer_phone = order.get('customerPhone', '').lower()
+                
+                if not any(search_lower in field for field in [order_id, customer_name, customer_phone]):
+                    continue
+            
+            filtered_orders.append(order)
+        
+        # Sort orders
+        reverse = sort_order.lower() == 'desc'
+        if sort_by == 'total':
+            filtered_orders.sort(key=lambda x: x.get('total', 0), reverse=reverse)
+        elif sort_by == 'customerName':
+            filtered_orders.sort(key=lambda x: x.get('customerName', ''), reverse=reverse)
+        elif sort_by == 'status':
+            filtered_orders.sort(key=lambda x: x.get('status', ''), reverse=reverse)
+        else:  # created_at
+            filtered_orders.sort(key=lambda x: x.get('created_at', ''), reverse=reverse)
+        
+        # Pagination
+        total = len(filtered_orders)
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        paginated_orders = filtered_orders[start_idx:end_idx]
+        
+        logger.info(f"Retrieved {len(paginated_orders)} orders for store {store_id}")
+        
+        return {
+            "success": True,
+            "orders": paginated_orders,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": (total + limit - 1) // limit
+        }
+        
+    except Exception as e:
+        logger.error(f"Error retrieving order history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve order history: {str(e)}"
+        )
+
+@router.get("/export", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def export_orders(
+    store_id: str = Query(..., description="Store identifier"),
+    format: str = Query("csv", description="Export format (csv/pdf)"),
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)")
+):
+    """
+    Export orders to CSV or PDF format
+    
+    Supports filtering by date range and exports in the specified format.
+    """
+    try:
+        # Parse dates
+        start_dt = None
+        end_dt = None
+        if start_date:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        if end_date:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        
+        # Filter orders
+        filtered_orders = []
+        for order in orders_db.values():
+            if order.get('store_id') != store_id:
+                continue
+                
+            # Date filter
+            if start_dt or end_dt:
+                order_dt = datetime.fromisoformat(order.get('created_at', '').replace('Z', '+00:00'))
+                if start_dt and order_dt < start_dt:
+                    continue
+                if end_dt and order_dt > end_dt:
+                    continue
+            
+            filtered_orders.append(order)
+        
+        if format.lower() == 'csv':
+            # Generate CSV
+            csv_data = "Order ID,Customer Name,Customer Phone,Items,Total,Status,Payment Method,Date\n"
+            for order in filtered_orders:
+                items_count = len(order.get('items', []))
+                csv_data += f"{order.get('id')},{order.get('customerName')},{order.get('customerPhone')},{items_count},{order.get('total')},{order.get('status')},{order.get('paymentMethod')},{order.get('orderDate')}\n"
+            
+            return {
+                "success": True,
+                "data": csv_data,
+                "format": "csv",
+                "filename": f"orders_{store_id}_{datetime.now().strftime('%Y%m%d')}.csv"
+            }
+        elif format.lower() == 'pdf':
+            # Generate PDF (simplified - in production use a proper PDF library)
+            pdf_data = f"VyaparAI Store Orders Report\nStore: {store_id}\nDate: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+            for order in filtered_orders:
+                pdf_data += f"Order: {order.get('id')}\nCustomer: {order.get('customerName')}\nTotal: ₹{order.get('total')}\nStatus: {order.get('status')}\n\n"
+            
+            return {
+                "success": True,
+                "data": pdf_data,
+                "format": "pdf",
+                "filename": f"orders_{store_id}_{datetime.now().strftime('%Y%m%d')}.pdf"
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported format. Use 'csv' or 'pdf'"
+            )
+        
+    except Exception as e:
+        logger.error(f"Error exporting orders: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export orders: {str(e)}"
+        )
+
+@router.get("/stats/daily", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_daily_stats(
+    store_id: str = Query(..., description="Store identifier"),
+    date: Optional[str] = Query(None, description="Date (YYYY-MM-DD format)")
+):
+    """
+    Get detailed daily statistics for a store
+    
+    Returns comprehensive metrics including revenue, order counts, and trends.
+    """
+    try:
+        # Use provided date or today
+        target_date = date or datetime.now().strftime('%Y-%m-%d')
+        start_dt = datetime.strptime(target_date, '%Y-%m-%d')
+        end_dt = start_dt + timedelta(days=1)
+        
+        # Filter orders for the date
+        daily_orders = []
+        total_revenue = 0
+        status_counts = {'pending': 0, 'completed': 0, 'cancelled': 0}
+        payment_counts = {'cash': 0, 'upi': 0, 'card': 0, 'cod': 0}
+        
+        for order in orders_db.values():
+            if order.get('store_id') != store_id:
+                continue
+                
+            order_dt = datetime.fromisoformat(order.get('created_at', '').replace('Z', '+00:00'))
+            if start_dt <= order_dt < end_dt:
+                daily_orders.append(order)
+                total_revenue += order.get('total', 0)
+                status = order.get('status', 'pending')
+                status_counts[status] = status_counts.get(status, 0) + 1
+                payment = order.get('paymentMethod', 'cash')
+                payment_counts[payment] = payment_counts.get(payment, 0) + 1
+        
+        # Calculate additional metrics
+        avg_order_value = total_revenue / len(daily_orders) if daily_orders else 0
+        unique_customers = len(set(order.get('customerPhone') for order in daily_orders))
+        
+        logger.info(f"Retrieved daily stats for store {store_id} on {target_date}")
+        
+        return {
+            "success": True,
+            "date": target_date,
+            "total_orders": len(daily_orders),
+            "total_revenue": total_revenue,
+            "average_order_value": round(avg_order_value, 2),
+            "unique_customers": unique_customers,
+            "status_breakdown": status_counts,
+            "payment_breakdown": payment_counts,
+            "orders": daily_orders
+        }
+        
+    except Exception as e:
+        logger.error(f"Error retrieving daily stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve daily stats: {str(e)}"
+        )
+
+# =============================================================================
+# TEST ENDPOINTS (Development Only)
+# =============================================================================
+
+class TestOrderRequest(BaseModel):
+    """Request model for test order generation"""
+    store_id: str = Field(..., description="Store identifier")
+    customer_name: Optional[str] = Field(None, description="Customer name")
+    customer_phone: Optional[str] = Field(None, description="Customer phone number")
+    order_type: Optional[str] = Field("random", description="Type of order to generate")
+
+@router.post("/test/generate-order", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def generate_test_order(request: TestOrderRequest):
+    """
+    Generate a test order for development and testing
+    
+    This endpoint creates a realistic test order with Indian context
+    for testing the order flow and WebSocket integration.
+    """
+    try:
+        import random
+        from datetime import datetime, timedelta
+        
+        # Generate realistic Indian order data
+        customer_names = [
+            "Rajesh Kumar", "Priya Sharma", "Amit Patel", "Neha Singh", "Suresh Verma",
+            "Anjali Gupta", "Rahul Mehta", "Kavita Reddy", "Vikram Malhotra", "Sunita Joshi"
+        ]
+        
+        indian_products = [
+            {"name": "Amul Milk", "price": 60, "unit": "1L"},
+            {"name": "Aashirvaad Atta", "price": 45, "unit": "1kg"},
+            {"name": "India Gate Basmati Rice", "price": 120, "unit": "1kg"},
+            {"name": "Tata Salt", "price": 20, "unit": "1kg"},
+            {"name": "Maggi Noodles", "price": 14, "unit": "70g"},
+            {"name": "Colgate Toothpaste", "price": 45, "unit": "100g"},
+            {"name": "Fresh Tomatoes", "price": 40, "unit": "1kg"},
+            {"name": "Fresh Onions", "price": 30, "unit": "1kg"}
+        ]
+        
+        # Generate order data
+        order_id = f"TEST-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
+        customer_name = request.customer_name or random.choice(customer_names)
+        customer_phone = request.customer_phone or f"+9198765{random.randint(10000, 99999)}"
+        
+        # Generate random items
+        num_items = random.randint(1, 4)
+        items = []
+        for i in range(num_items):
+            product = random.choice(indian_products)
+            quantity = random.randint(1, 3)
+            items.append({
+                "id": f"item_{i+1}",
+                "productName": product["name"],
+                "quantity": quantity,
+                "unit": product["unit"],
+                "price": product["price"],
+                "total": product["price"] * quantity
+            })
+        
+        # Calculate totals
+        subtotal = sum(item["total"] for item in items)
+        tax = subtotal * 0.05  # 5% tax
+        delivery_fee = 0 if subtotal > 500 else 50
+        total = subtotal + tax + delivery_fee
+        
+        # Generate order
+        order_data = {
+            "id": order_id,
+            "customerName": customer_name,
+            "customerPhone": customer_phone,
+            "deliveryAddress": f"123, MG Road, Bangalore, Karnataka 560001",
+            "items": items,
+            "total": round(total, 2),
+            "subtotal": round(subtotal, 2),
+            "tax": round(tax, 2),
+            "deliveryFee": delivery_fee,
+            "status": "pending",
+            "paymentMethod": random.choice(["cash", "card", "upi", "cod"]),
+            "paymentStatus": "pending",
+            "orderDate": datetime.now().isoformat(),
+            "deliveryTime": (datetime.now() + timedelta(minutes=45)).isoformat(),
+            "notes": "Test order generated for development",
+            "channel": "test",
+            "language": "en",
+            "createdAt": datetime.now().isoformat(),
+            "updatedAt": datetime.now().isoformat(),
+            "store_id": request.store_id
+        }
+        
+        # Store order
+        orders_db[order_id] = order_data
+        
+        # Add to customer orders
+        if customer_phone not in customer_orders:
+            customer_orders[customer_phone] = []
+        customer_orders[customer_phone].append(order_id)
+        
+        # Emit WebSocket event if available
+        try:
+            from app.websocket.socket_manager import socket_manager
+            await socket_manager.emit_new_order(order_data)
+            logger.info(f"Emitted WebSocket event for test order {order_id}")
+        except Exception as e:
+            logger.warning(f"Failed to emit WebSocket event: {e}")
+        
+        logger.info(f"Generated test order: {order_id}")
+        
+        return {
+            "success": True,
+            "order_id": order_id,
+            "order_data": order_data,
+            "message": f"Test order {order_id} generated successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating test order: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate test order: {str(e)}"
+        )
+
+@router.post("/")
+async def create_order_with_payment(order_data: CreateOrderRequest):
+    """Create order with payment integration"""
+    
+    try:
+        # Generate order ID
+        order_id = f"ORD{uuid.uuid4().hex[:8].upper()}"
+        
+        # Calculate order totals
+        subtotal = sum(item.quantity * item.unit_price for item in order_data.items)
+        tax_rate = 0.05  # 5% GST
+        tax_amount = subtotal * tax_rate
+        delivery_fee = 20 if subtotal < 200 else 0
+        total_amount = subtotal + tax_amount + delivery_fee
+        
+        # Convert items to JSON
+        items_json = json.dumps([item.dict() for item in order_data.items])
+        
+        # Create order object
+        order = Order(
+            id=order_id,
+            store_id=order_data.store_id,
+            customer_name=order_data.customer_name,
+            customer_phone=order_data.customer_phone,
+            customer_email=order_data.customer_email,
+            delivery_address=order_data.delivery_address,
+            items=items_json,
+            subtotal=subtotal,
+            tax_amount=tax_amount,
+            delivery_fee=delivery_fee,
+            total_amount=total_amount,
+            status=OrderStatus.PENDING,
+            payment_method=PaymentMethod(order_data.payment_method),
+            payment_status=PaymentStatus.PENDING,
+            delivery_notes=order_data.delivery_notes,
+            is_urgent=order_data.is_urgent,
+            channel=order_data.channel,
+            language=order_data.language,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        # Handle payment based on method
+        payment_required = order_data.payment_method != "cod"
+        payment_id = None
+        
+        if payment_required:
+            # Create payment intent for online payments
+            payment_result = await payment_service.create_payment_intent(
+                order_id=order_id,
+                amount=Decimal(str(total_amount)),
+                customer_info={
+                    "name": order_data.customer_name,
+                    "phone": order_data.customer_phone,
+                    "email": order_data.customer_email
+                }
+            )
+            
+            if not payment_result["success"]:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Payment intent creation failed: {payment_result.get('error', 'Unknown error')}"
+                )
+            
+            payment_id = payment_result["payment_id"]
+            order.payment_id = payment_id
+            order.payment_created_at = datetime.utcnow()
+            order.payment_gateway_response = json.dumps(payment_result.get("gateway_response", {}))
+        else:
+            # Handle Cash on Delivery
+            cod_result = await payment_service.process_cod_payment(
+                order_id=order_id,
+                amount=Decimal(str(total_amount))
+            )
+            
+            if cod_result["success"]:
+                payment_id = cod_result["payment_id"]
+                order.payment_id = payment_id
+                order.payment_created_at = datetime.utcnow()
+                order.payment_gateway_response = json.dumps(cod_result.get("gateway_response", {}))
+        
+        # For now, we'll simulate saving to database
+        # In production, this would be: db.add(order); db.commit()
+        
+        return {
+            "success": True,
+            "order_id": order_id,
+            "payment_id": payment_id,
+            "total_amount": total_amount,
+            "payment_required": payment_required,
+            "payment_method": order_data.payment_method,
+            "order": order.to_dict(),
+            "message": "Order created successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Order creation failed: {str(e)}")
+
+@router.post("/{order_id}/payment/confirm")
+async def confirm_order_payment(order_id: str, payment_data: PaymentConfirmationRequest):
+    """Confirm payment for an order"""
+    
+    try:
+        # Verify payment
+        if payment_data.razorpay_payment_id and payment_data.razorpay_signature:
+            verification_result = await payment_service.verify_payment(
+                payment_id=payment_data.payment_id,
+                razorpay_payment_id=payment_data.razorpay_payment_id,
+                razorpay_signature=payment_data.razorpay_signature
+            )
+            
+            if not verification_result["success"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Payment verification failed: {verification_result.get('error', 'Unknown error')}"
+                )
+        
+        # Update order status based on payment
+        payment_status = PaymentStatus(payment_data.payment_status)
+        
+        # In production, this would update the database
+        # order = db.query(Order).filter(Order.id == order_id).first()
+        # order.payment_status = payment_status
+        # order.status = OrderStatus.CONFIRMED if payment_status == PaymentStatus.COMPLETED else OrderStatus.PENDING
+        # order.payment_completed_at = datetime.utcnow()
+        # db.commit()
+        
+        return {
+            "success": True,
+            "order_id": order_id,
+            "payment_status": payment_status.value,
+            "order_status": "confirmed" if payment_status == PaymentStatus.COMPLETED else "pending",
+            "message": "Payment confirmed successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment confirmation failed: {str(e)}")
+
+@router.get("/{order_id}")
+async def get_order_details(order_id: str):
+    """Get order details by ID"""
+    
+    try:
+        # In production, this would query the database
+        # order = db.query(Order).filter(Order.id == order_id).first()
+        # if not order:
+        #     raise HTTPException(status_code=404, detail="Order not found")
+        
+        # For now, return mock data
+        mock_order = {
+            "id": order_id,
+            "store_id": "STORE-001",
+            "customer_name": "Test Customer",
+            "customer_phone": "+919876543210",
+            "delivery_address": "123 Test Street, Mumbai",
+            "items": json.dumps([
+                {"product_name": "Rice", "quantity": 2, "unit_price": 50, "total_price": 100}
+            ]),
+            "subtotal": 100.0,
+            "tax_amount": 5.0,
+            "delivery_fee": 20.0,
+            "total_amount": 125.0,
+            "status": "pending",
+            "payment_id": f"pay_{order_id}",
+            "payment_status": "pending",
+            "payment_method": "upi",
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        return {
+            "success": True,
+            "order": mock_order
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get order details: {str(e)}")
+
+@router.put("/{order_id}/status")
+async def update_order_status(order_id: str, status_data: UpdateOrderStatusRequest):
+    """Update order status"""
+    
+    try:
+        # Validate status
+        try:
+            new_status = OrderStatus(status_data.status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid order status")
+        
+        # In production, this would update the database
+        # order = db.query(Order).filter(Order.id == order_id).first()
+        # if not order:
+        #     raise HTTPException(status_code=404, detail="Order not found")
+        # order.status = new_status
+        # order.updated_at = datetime.utcnow()
+        # db.commit()
+        
+        return {
+            "success": True,
+            "order_id": order_id,
+            "status": new_status.value,
+            "message": "Order status updated successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update order status: {str(e)}")
+
+@router.get("/")
+async def get_orders(store_id: str = "STORE-001", limit: int = 50, offset: int = 0):
+    """Get orders for a store"""
+    
+    try:
+        # In production, this would query the database
+        # orders = db.query(Order).filter(Order.store_id == store_id).offset(offset).limit(limit).all()
+        
+        # For now, return mock data
+        mock_orders = [
+            {
+                "id": f"ORD{i:08d}",
+                "store_id": store_id,
+                "customer_name": f"Customer {i}",
+                "customer_phone": "+919876543210",
+                "total_amount": 100 + (i * 10),
+                "status": "pending",
+                "payment_status": "pending",
+                "created_at": datetime.utcnow().isoformat()
+            }
+            for i in range(1, min(limit + 1, 11))
+        ]
+        
+        return {
+            "success": True,
+            "orders": mock_orders,
+            "total": len(mock_orders),
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get orders: {str(e)}")
+
+@router.post("/calculate-total")
+async def calculate_order_total(items: List[OrderItemRequest], tax_rate: float = 0.05, delivery_fee: float = 20.0):
+    """Calculate order total with tax and delivery"""
+    
+    try:
+        subtotal = sum(item.quantity * item.unit_price for item in items)
+        tax_amount = subtotal * tax_rate
+        total_delivery_fee = delivery_fee if subtotal < 200 else 0
+        total_amount = subtotal + tax_amount + total_delivery_fee
+        
+        return {
+            "success": True,
+            "subtotal": subtotal,
+            "tax_amount": tax_amount,
+            "tax_rate": tax_rate,
+            "delivery_fee": total_delivery_fee,
+            "total_amount": total_amount,
+            "breakdown": {
+                "items": [item.dict() for item in items],
+                "subtotal": subtotal,
+                "tax": tax_amount,
+                "delivery": total_delivery_fee,
+                "total": total_amount
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to calculate total: {str(e)}")

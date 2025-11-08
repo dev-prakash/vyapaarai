@@ -1,0 +1,25 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": [
+        "https://www.vyapaarai.com",
+        "https://vyapaarai.com"
+      ],
+      "AllowedMethods": [
+        "GET",
+        "PUT",
+        "POST",
+        "DELETE",
+        "HEAD"
+      ],
+      "AllowedHeaders": [
+        "*"
+      ],
+      "ExposeHeaders": [
+        "ETag",
+        "x-amz-request-id"
+      ],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}

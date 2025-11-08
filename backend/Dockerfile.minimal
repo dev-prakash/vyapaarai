@@ -1,0 +1,10 @@
+FROM public.ecr.aws/lambda/python:3.11
+
+# Copy minimal requirements
+COPY requirements_minimal.txt /tmp/requirements.txt
+
+# Install only essential dependencies
+RUN pip install -r /tmp/requirements.txt -t /tmp/python --no-deps
+
+# Install dependencies of dependencies
+RUN pip install -r /tmp/requirements.txt -t /tmp/python

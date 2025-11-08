@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VyapaarAI – System Overview & Data Dictionary</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    :root { --fg: #0f172a; --muted: #475569; --accent: #0ea5e9; --bg: #ffffff; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .container { max-width: 1080px; margin: 0 auto; padding: 32px 24px; }
+    h1 { font-size: 28px; margin: 0 0 16px; }
+    h2 { font-size: 22px; margin: 28px 0 12px; }
+    h3 { font-size: 18px; margin: 20px 0 8px; }
+    p, li { line-height: 1.6; color: var(--fg); }
+    .muted { color: var(--muted); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #e2e8f0; color: #0f172a; font-size: 12px; font-weight: 600; }
+    .card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin: 16px 0; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    @media (min-width: 900px) { .grid-2 { grid-template-columns: 1fr 1fr; } }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background: #f8fafc; }
+    pre { border: 1px solid #e2e8f0; padding: 12px; border-radius: 8px; overflow: auto; }
+    .section { page-break-inside: avoid; }
+    @media print { a { text-decoration: none; color: inherit; } }
+  </style>
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default' });
+  </script>
+  <meta name="description" content="VyapaarAI – System architecture, database structure, import data dictionary, and security overview." />
+</head>
+<body>
+  <div class="container">
+    <div class="section">
+      <h1>VyapaarAI – System Overview</h1>
+      <p class="muted">A modern PWA for global product curation and store inventory management.</p>
+      <div class="card">
+        <div><span class="pill">Frontend</span> React + TypeScript (Vite PWA), Zustand, Axios, MUI, S3 + CloudFront</div>
+        <div><span class="pill">Backend</span> FastAPI on AWS Lambda (Mangum), Lambda Function URL (CORS), DynamoDB</div>
+        <div><span class="pill">Auth</span> JWT, bcrypt (with legacy SHA-256 migration), role-based (admin/super_admin)</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Architecture Diagram</h2>
+      <pre class="mermaid">
+flowchart LR
+  subgraph Client [Frontend PWA (React+TS)]
+    UI[Admin UI / Store UI]
+    State[Zustand Store]
+    AX[Axios + JWT Interceptors]
+    UI --> State
+    UI --> AX
+  end
+
+  subgraph CDN [CloudFront (www.vyapaarai.com)]
+    S3FE[S3 Static Frontend]
+  end
+
+  subgraph API [AWS Lambda + FastAPI]
+    LFN[Lambda Function URL (CORS)]
+    App[FastAPI + Mangum]
+  end
+
+  subgraph Data [DynamoDB]
+    GP[(vyaparai-global-products-prod)]
+    INV[(vyaparai-store-inventory-prod)]
+  end
+
+  subgraph Assets [S3 (images future)]
+    IMG[(Product Images)]
+  end
+
+  Auth[JWT (bcrypt + legacy SHA-256 migration)]
+
+  UI -->|HTTPS| CDN
+  CDN -->|Static| S3FE
+  UI -->|HTTPS API| LFN --> App
+  App -->|read/write| GP
+  App -->|read/write| INV
+  App -. future .-> IMG
+  AX --> Auth
+      </pre>
+    </div>
+
+    <div class="section">
+      <h2>Database Model (DynamoDB)</h2>
+      <pre class="mermaid">
+erDiagram
+  GLOBAL_PRODUCT {
+    string product_id PK
+    string name
+    string brand
+    string category
+    string barcode
+    string[] additional_barcodes
+    map canonical_image_urls
+    map attributes
+    string verification_status
+    number quality_score
+    map regional_names
+    string[] primary_regions
+    map contributed_names
+    number stores_using_count
+    string created_by
+    string last_updated_by
+    string import_source
+    string admin_notes
+    list status_history
+    string image_hash
+    string created_at
+    string updated_at
+  }
+
+  STORE_INVENTORY {
+    string store_id PK
+    string product_id SK
+    string gsi_product_id
+    number quantity
+    number cost_price
+    number selling_price
+    number reorder_level
+    string supplier
+    string location
+    map custom_image_urls
+    string notes
+    string last_updated
+  }
+
+  GLOBAL_PRODUCT ||--o{ STORE_INVENTORY : "referenced by product_id"
+      </pre>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>Global Products (vyaparai-global-products-prod)</h3>
+          <ul>
+            <li>PK: product_id</li>
+            <li>GSIs: <strong>barcode-index</strong> (barcode), <strong>image_hash-index</strong> (image_hash)</li>
+            <li>Images: canonical_image_urls map (supports multiple, e.g., original, image_2..image_10)</li>
+            <li>Attributes: description, size, unit, weight, pack_size, manufacturer, country_of_origin, ingredients, nutrition</li>
+            <li>Regionalization: regional_names (region → names[]), primary_regions, contributed_names</li>
+            <li>Workflow: verification_status, status_history, quality_score, admin_notes</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Store Inventory (vyaparai-store-inventory-prod)</h3>
+          <ul>
+            <li>PK: store_id, SK: product_id</li>
+            <li>Quantities/pricing: quantity, cost_price, selling_price, reorder_level</li>
+            <li>Per-store: supplier, location, custom_image_urls, notes</li>
+            <li>Join: references global product by product_id</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>CSV Import – Data Dictionary</h2>
+      <div class="card">
+        <h3>Required</h3>
+        <ul>
+          <li><strong>name</strong>: Product name</li>
+          <li><strong>category</strong>: Catalog category</li>
+        </ul>
+        <h3>Identification</h3>
+        <ul>
+          <li><strong>brand</strong> (optional)</li>
+          <li><strong>barcode</strong> (optional; digits only)</li>
+        </ul>
+        <h3>Description & Images</h3>
+        <ul>
+          <li><strong>description</strong> (optional)</li>
+          <li><strong>image_url_1..image_url_10</strong> (optional; first is canonical original)</li>
+        </ul>
+        <h3>Attributes</h3>
+        <ul>
+          <li>size, unit, weight, pack_size, manufacturer, country_of_origin, ingredients</li>
+        </ul>
+        <h3>Nutrition</h3>
+        <ul>
+          <li>nutrition_energy, nutrition_fat, nutrition_carbohydrates, nutrition_proteins, nutrition_salt</li>
+        </ul>
+        <h3>Regional Names</h3>
+        <ul>
+          <li>regional_names_IN-MH, regional_names_IN-TN, regional_names_IN-KA, regional_names_IN-UP, regional_names_IN-GJ</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Security Overview</h2>
+      <ul>
+        <li><strong>AuthN</strong>: JWT; bcrypt passwords with legacy SHA-256 migration on login.</li>
+        <li><strong>AuthZ</strong>: Admin endpoints restricted to roles {admin, super_admin}.</li>
+        <li><strong>CORS</strong>: Centralized at Lambda Function URL (avoid duplicate headers in code).</li>
+        <li><strong>IAM</strong>: Lambda role limited to DynamoDB tables and CloudWatch logs.</li>
+        <li><strong>Data Integrity</strong>: Status allowlist; append-only status_history; dedupe via barcode/name+brand/image_hash.</li>
+        <li><strong>Images</strong>: Current – external URLs; Next – presigned S3 uploads + background processing.</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <h2>Deployment & Runbook</h2>
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>Frontend</h3>
+          <pre>npm run build
+aws s3 sync dist/ s3://vyapaarai.com --delete
+aws cloudfront create-invalidation --distribution-id E1UY93SVXV8QOF --paths "/*"</pre>
+        </div>
+        <div class="card">
+          <h3>Backend</h3>
+          <pre>zip -r lambda_function.zip .
+aws lambda update-function-code --function-name vyaparai-api-prod --zip-file fileb://lambda_function.zip</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>How to Export PDF</h2>
+      <ol>
+        <li>Open this file in your browser: <code>vyaparai/docs/VyapaarAI_System_Overview.html</code></li>
+        <li>Use <em>File → Print</em>, then select <em>Save as PDF</em>.</li>
+        <li>For best results, enable background graphics in print options.</li>
+      </ol>
+    </div>
+  </div>
+</body>
+</html>
+

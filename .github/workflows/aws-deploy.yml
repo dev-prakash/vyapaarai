@@ -1,0 +1,519 @@
+name: VyaparAI AWS Deployment
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+  pull_request:
+    branches:
+      - main
+      - develop
+      - staging
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      force_deploy:
+        description: 'Force deployment'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: vyaparai-api
+  DOCKER_IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # Test job
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.11]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+            
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio httpx
+          
+      - name: Run linting
+        run: |
+          pip install flake8 black isort mypy
+          flake8 app/ tests/
+          black --check app/ tests/
+          isort --check-only app/ tests/
+          mypy app/
+          
+      - name: Run tests
+        run: |
+          pytest tests/ --cov=app --cov-report=xml --cov-report=html
+          
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+  # Security scan job
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Run Bandit security scan
+        uses: python-security/bandit-action@v1
+        with:
+          path: app/
+          level: low
+          
+      - name: Run Safety check
+        run: |
+          pip install safety
+          safety check --json --output safety-report.json
+          
+      - name: Upload safety report
+        uses: actions/upload-artifact@v3
+        with:
+          name: safety-report
+          path: safety-report.json
+
+  # Build and push Docker image
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ env.DOCKER_IMAGE_TAG }}
+        run: |
+          # Create ECR repository if it doesn't exist
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region $AWS_REGION || \
+          aws ecr create-repository --repository-name $ECR_REPOSITORY --region $AWS_REGION
+          
+          # Build Docker image
+          docker build -f Dockerfile.lambda -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -f Dockerfile.lambda -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          
+          # Push Docker image
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+      - name: Save image metadata
+        run: |
+          echo "IMAGE_TAG=${{ env.DOCKER_IMAGE_TAG }}" >> $GITHUB_ENV
+          echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> $GITHUB_ENV
+
+  # Deploy to development
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    environment: development
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Serverless Framework
+        run: npm install -g serverless
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+          
+      - name: Deploy infrastructure
+        run: |
+          cd infrastructure/terraform
+          terraform init
+          terraform plan -var="environment=dev" -var="aws_region=${{ env.AWS_REGION }}"
+          terraform apply -var="environment=dev" -var="aws_region=${{ env.AWS_REGION }}" -auto-approve
+          
+      - name: Deploy with Serverless
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          STAGE: dev
+        run: |
+          serverless deploy --stage dev --region ${{ env.AWS_REGION }} --verbose
+          
+      - name: Run health checks
+        run: |
+          # Get API URL from Serverless output
+          API_URL=$(serverless info --stage dev --region ${{ env.AWS_REGION }} | grep "endpoints:" | awk '{print $2}')
+          
+          # Wait for deployment to be ready
+          sleep 30
+          
+          # Test health endpoint
+          curl -f "$API_URL/health" || exit 1
+          
+          # Test API endpoint
+          curl -f "$API_URL/api" || exit 1
+          
+      - name: Notify deployment
+        if: always()
+        run: |
+          echo "Deployment to development completed"
+          # Add notification logic here (Slack, email, etc.)
+
+  # Deploy to staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/staging' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Serverless Framework
+        run: npm install -g serverless
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+          
+      - name: Deploy infrastructure
+        run: |
+          cd infrastructure/terraform
+          terraform init
+          terraform plan -var="environment=staging" -var="aws_region=${{ env.AWS_REGION }}"
+          terraform apply -var="environment=staging" -var="aws_region=${{ env.AWS_REGION }}" -auto-approve
+          
+      - name: Deploy with Serverless
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          STAGE: staging
+        run: |
+          serverless deploy --stage staging --region ${{ env.AWS_REGION }} --verbose
+          
+      - name: Run smoke tests
+        run: |
+          # Get API URL from Serverless output
+          API_URL=$(serverless info --stage staging --region ${{ env.AWS_REGION }} | grep "endpoints:" | awk '{print $2}')
+          
+          # Wait for deployment to be ready
+          sleep 30
+          
+          # Run smoke tests
+          python3 test_fastapi_app.py --base-url "$API_URL" || exit 1
+          
+      - name: Invalidate CloudFront cache
+        run: |
+          # Get CloudFront distribution ID from Terraform output
+          cd infrastructure/terraform
+          DISTRIBUTION_ID=$(terraform output -raw cloudfront_distribution_id)
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+          
+      - name: Notify deployment
+        if: always()
+        run: |
+          echo "Deployment to staging completed"
+          # Add notification logic here
+
+  # Deploy to production
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install Serverless Framework
+        run: npm install -g serverless
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+          
+      - name: Deploy infrastructure
+        run: |
+          cd infrastructure/terraform
+          terraform init
+          terraform plan -var="environment=prod" -var="aws_region=${{ env.AWS_REGION }}"
+          terraform apply -var="environment=prod" -var="aws_region=${{ env.AWS_REGION }}" -auto-approve
+          
+      - name: Deploy with Serverless
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          STAGE: prod
+        run: |
+          serverless deploy --stage prod --region ${{ env.AWS_REGION }} --verbose
+          
+      - name: Run comprehensive tests
+        run: |
+          # Get API URL from Serverless output
+          API_URL=$(serverless info --stage prod --region ${{ env.AWS_REGION }} | grep "endpoints:" | awk '{print $2}')
+          
+          # Wait for deployment to be ready
+          sleep 60
+          
+          # Run comprehensive tests
+          python3 test_fastapi_app.py --base-url "$API_URL" || exit 1
+          python3 test_unified_order_service.py || exit 1
+          
+      - name: Invalidate CloudFront cache
+        run: |
+          # Get CloudFront distribution ID from Terraform output
+          cd infrastructure/terraform
+          DISTRIBUTION_ID=$(terraform output -raw cloudfront_distribution_id)
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+          
+      - name: Create GitHub release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: Release v${{ github.run_number }}
+          body: |
+            Production deployment completed successfully.
+            
+            **Changes:**
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref }}
+            - Environment: Production
+            
+            **API Endpoints:**
+            - Health: ${{ steps.api-url.outputs.url }}/health
+            - Documentation: ${{ steps.api-url.outputs.url }}/docs
+            
+          draft: false
+          prerelease: false
+          
+      - name: Notify deployment
+        if: always()
+        run: |
+          echo "Production deployment completed"
+          # Add notification logic here (Slack, email, etc.)
+
+  # Performance testing
+  performance-test:
+    name: Performance Test
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-prod]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install Artillery
+        run: npm install -g artillery
+        
+      - name: Run performance tests
+        run: |
+          # Get API URL based on environment
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            API_URL=$(serverless info --stage prod --region ${{ env.AWS_REGION }} | grep "endpoints:" | awk '{print $2}')
+          else
+            API_URL=$(serverless info --stage staging --region ${{ env.AWS_REGION }} | grep "endpoints:" | awk '{print $2}')
+          fi
+          
+          # Run performance tests
+          artillery run performance-tests/load-test.yml --target "$API_URL"
+          
+      - name: Upload performance report
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-report
+          path: artillery-report.json
+
+  # Monitoring and alerting
+  monitor:
+    name: Monitor Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-prod]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Check CloudWatch metrics
+        run: |
+          # Get metrics for the last hour
+          aws cloudwatch get-metric-statistics \
+            --namespace AWS/Lambda \
+            --metric-name Duration \
+            --dimensions Name=FunctionName,Value=vyaparai-api-${{ github.ref == 'refs/heads/main' && 'prod' || 'staging' }} \
+            --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --period 300 \
+            --statistics Average
+          
+      - name: Check error rates
+        run: |
+          # Check for errors in CloudWatch logs
+          aws logs filter-log-events \
+            --log-group-name "/aws/lambda/vyaparai-api-${{ github.ref == 'refs/heads/main' && 'prod' || 'staging' }}" \
+            --start-time $(date -u -d '1 hour ago' +%s)000 \
+            --filter-pattern "ERROR"
+          
+      - name: Send monitoring report
+        if: always()
+        run: |
+          echo "Monitoring report generated"
+          # Add monitoring notification logic here
+
+  # Cleanup job
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-staging, deploy-prod]
+    if: always()
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Cleanup old Docker images
+        run: |
+          # Remove old Docker images from ECR (keep last 10)
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageDetails[?imagePushedAt<`'$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%S)'`].imageDigest' \
+            --output text | \
+          while read digest; do
+            aws ecr batch-delete-image \
+              --repository-name ${{ env.ECR_REPOSITORY }} \
+              --image-ids imageDigest=$digest \
+              --region ${{ env.AWS_REGION }}
+          done
+          
+      - name: Cleanup old CloudWatch logs
+        run: |
+          # Delete old CloudWatch log groups (older than 30 days)
+          aws logs describe-log-groups \
+            --region ${{ env.AWS_REGION }} \
+            --query 'logGroups[?creationTime<`'$(date -u -d '30 days ago' +%s)000'`].logGroupName' \
+            --output text | \
+          while read logGroup; do
+            if [[ $logGroup == *"vyaparai"* ]]; then
+              aws logs delete-log-group --log-group-name $logGroup --region ${{ env.AWS_REGION }}
+            fi
+          done

@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - ENABLE_CORS=true
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=vyaparai_dev
+      - POSTGRES_USER=vyaparai
+      - POSTGRES_PASSWORD=dev_password
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GOOGLE_TRANSLATE_API_KEY=${GOOGLE_TRANSLATE_API_KEY:-}
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - vyaparai-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - vyaparai-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=vyaparai_dev
+      - POSTGRES_USER=vyaparai
+      - POSTGRES_PASSWORD=dev_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/app/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - vyaparai-network
+    restart: unless-stopped
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@vyaparai.com
+      - PGADMIN_DEFAULT_PASSWORD=admin123
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - vyaparai-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+
+  # Optional: Redis Commander for Redis management
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    networks:
+      - vyaparai-network
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:
+  postgres_data:
+  pgadmin_data:
+
+networks:
+  vyaparai-network:
+    driver: bridge

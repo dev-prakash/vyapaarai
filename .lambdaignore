@@ -1,0 +1,98 @@
+# Development files
+tests/
+test_*
+*_test.py
+pytest.ini
+.pytest_cache/
+
+# Documentation
+docs/
+*.md
+README*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cache files
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# Compiled binaries
+*.so
+*.dylib
+*.dll
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+
+# Git files
+.git/
+.gitignore
+
+# Virtual environment
+venv/
+env/
+.env
+
+# Build artifacts
+build/
+dist/
+
+# Node.js files (if any)
+node_modules/
+package.json
+package-lock.json
+yarn.lock
+
+# Log files
+*.log
+logs/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Backup files
+backup_*
+*_backup/
+
+# Large data files
+*.csv
+*.json.gz
+*.parquet
+
+# Docker files
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Serverless files
+.serverless/
+serverless.yml
+samconfig.toml
+
+# Terraform files
+*.tf
+*.tfstate
+*.tfvars
+
+# Deployment scripts
+deploy-*.sh
+*.sh
+
+# Analysis reports
+*-report.json
+package-size-report.json
+cleanup-report.json

@@ -1,0 +1,384 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ main, production ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  AWS_REGION: ap-south-1
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # Security and Quality Checks
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Backend Tests
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-cov safety
+
+      - name: Run safety check
+        run: |
+          cd backend
+          safety check --json --output safety-report.json
+
+      - name: Run tests
+        run: |
+          cd backend
+          pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./backend/coverage.xml
+          flags: backend
+          name: backend-coverage
+
+  # Frontend Tests
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend-pwa/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd frontend-pwa
+          npm ci
+
+      - name: Run linting
+        run: |
+          cd frontend-pwa
+          npm run lint
+
+      - name: Run tests
+        run: |
+          cd frontend-pwa
+          npm test -- --watchAll=false --coverage --coverageReporters=text --coverageReporters=lcov
+
+      - name: Run security audit
+        run: |
+          cd frontend-pwa
+          npm audit --audit-level moderate
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./frontend-pwa/coverage/lcov.info
+          flags: frontend
+          name: frontend-coverage
+
+  # Integration Tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run integration tests
+        run: |
+          npm install
+          npm run test:integration
+
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: integration-test-report.json
+
+  # Build and Deploy
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [security-scan, backend-tests, frontend-tests, integration-tests]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production' || startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend-pwa/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Build Frontend
+      - name: Build frontend
+        run: |
+          cd frontend-pwa
+          npm ci
+          npm run build
+        env:
+          VITE_API_BASE_URL: https://api.vyaparai.com
+          VITE_WS_URL: wss://api.vyaparai.com
+
+      # Deploy Frontend
+      - name: Deploy frontend to S3
+        run: |
+          aws s3 sync frontend-pwa/dist/ s3://${{ secrets.S3_BUCKET }} --delete --cache-control "max-age=31536000,public"
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+        env:
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+
+      # Deploy Backend
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+
+      - name: Deploy backend to Lambda
+        run: |
+          cd backend/lambda-deploy-simple
+          zip -r lambda_handler.zip lambda_handler.py
+          aws lambda update-function-code \
+            --function-name vyaparai-api-prod \
+            --zip-file fileb://lambda_handler.zip \
+            --region ${{ env.AWS_REGION }}
+
+      # Deploy Monitoring
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Deploy monitoring infrastructure
+        run: |
+          cd infrastructure
+          terraform init -input=false
+          terraform apply -auto-approve \
+            -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+            -var="slack_webhook_url=${{ secrets.SLACK_WEBHOOK_URL }}"
+
+      # Health Checks
+      - name: Wait for deployment to stabilize
+        run: sleep 60
+
+      - name: Run health checks
+        run: |
+          # Test health endpoint
+          HEALTH_RESPONSE=$(curl -s -w "%{http_code}" https://api.vyaparai.com/health -o /dev/null)
+          if [ "$HEALTH_RESPONSE" != "200" ]; then
+            echo "Health check failed: HTTP $HEALTH_RESPONSE"
+            exit 1
+          fi
+          
+          # Test API endpoints
+          for endpoint in "/api/v1/health" "/api/v1/orders" "/api/v1/auth/send-otp"; do
+            RESPONSE=$(curl -s -w "%{http_code}" "https://api.vyaparai.com$endpoint" -o /dev/null)
+            echo "Endpoint $endpoint: HTTP $RESPONSE"
+          done
+
+      # Performance Tests
+      - name: Run performance tests
+        run: |
+          # Simple load test
+          curl -s -o /dev/null -w "Response time: %{time_total}s\n" https://api.vyaparai.com/health
+          
+          # Test multiple concurrent requests
+          for i in {1..10}; do
+            curl -s -o /dev/null -w "Request $i: %{time_total}s\n" https://api.vyaparai.com/health &
+          done
+          wait
+
+      # Notifications
+      - name: Send Slack notification
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: "🚀 VyaparAI Production Deployment Successful\n• Environment: Production\n• Commit: ${{ github.sha }}\n• Branch: ${{ github.ref_name }}"
+
+      - name: Send Slack notification
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: "❌ VyaparAI Production Deployment Failed\n• Environment: Production\n• Commit: ${{ github.sha }}\n• Branch: ${{ github.ref_name }}\n• Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # Post-deployment monitoring
+  post-deployment-monitoring:
+    name: Post-deployment Monitoring
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify CloudWatch alarms
+        run: |
+          # Check if alarms are in OK state
+          ALARMS=$(aws cloudwatch describe-alarms --alarm-names \
+            vyaparai-lambda-error-rate \
+            vyaparai-lambda-duration \
+            vyaparai-api-gateway-5xx-errors \
+            --query 'MetricAlarms[?StateValue==`OK`].AlarmName' --output text)
+          
+          echo "Active alarms: $ALARMS"
+
+      - name: Check Lambda function status
+        run: |
+          FUNCTION_STATUS=$(aws lambda get-function --function-name vyaparai-api-prod --query 'Configuration.State' --output text)
+          echo "Lambda function status: $FUNCTION_STATUS"
+          
+          if [ "$FUNCTION_STATUS" != "Active" ]; then
+            echo "Lambda function is not active"
+            exit 1
+          fi
+
+      - name: Verify DynamoDB tables
+        run: |
+          # Check if DynamoDB tables exist and are active
+          ORDERS_TABLE=$(aws dynamodb describe-table --table-name vyaparai-orders-prod --query 'Table.TableStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+          echo "Orders table status: $ORDERS_TABLE"
+          
+          if [ "$ORDERS_TABLE" != "ACTIVE" ]; then
+            echo "Orders table is not active"
+            exit 1
+          fi
+
+  # Rollback job (manual trigger)
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    if: github.event.inputs.rollback == 'true'
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback Lambda function
+        run: |
+          # List available versions
+          VERSIONS=$(aws lambda list-versions-by-function --function-name vyaparai-api-prod --query 'Versions[?Version!=`$LATEST`].Version' --output text)
+          
+          # Get the previous version
+          PREVIOUS_VERSION=$(echo $VERSIONS | tr ' ' '\n' | tail -2 | head -1)
+          
+          if [ -n "$PREVIOUS_VERSION" ]; then
+            echo "Rolling back to version: $PREVIOUS_VERSION"
+            aws lambda update-function-code \
+              --function-name vyaparai-api-prod \
+              --zip-file "https://lambda.$AWS_REGION.amazonaws.com/20150331/functions/vyaparai-api-prod/versions/$PREVIOUS_VERSION"
+          else
+            echo "No previous version found for rollback"
+            exit 1
+          fi
+
+      - name: Send rollback notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: "🔄 VyaparAI Production Rollback Completed\n• Rolled back to previous version\n• Manual trigger by: ${{ github.actor }}"

@@ -1,0 +1,28 @@
+{
+  "name": "vyaparai-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "frontend-pwa",
+    "extension"
+  ],
+  "scripts": {
+    "dev:frontend": "yarn workspace frontend-pwa dev",
+    "dev:extension": "yarn workspace extension dev",
+    "build:frontend": "yarn workspace frontend-pwa build",
+    "build:extension": "yarn workspace extension build",
+    "install:all": "yarn install",
+    "analyze:size": "python3 scripts/analyze-package-size.py",
+    "check:deployment": "./scripts/check-deployment-status.sh",
+    "test:endpoints": "./scripts/test-endpoints-simple.sh",
+    "analyze:dependencies": "python3 scripts/dependency-analysis.py",
+    "test:all": "npm run analyze:size && npm run check:deployment && npm run test:endpoints",
+    "test:integration": "node scripts/test-full-stack-integration.js",
+    "verify:realtime": "python3 scripts/verify-realtime-features.py",
+    "deploy:production": "./scripts/deploy-production.sh",
+    "analyze:features": "python3 scripts/feature-gap-analysis.py"
+  },
+  "dependencies": {
+    "axios": "^1.11.0"
+  }
+}

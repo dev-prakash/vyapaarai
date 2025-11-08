@@ -1,0 +1,6 @@
+PyJWT==2.8.0
+boto3
+botocore
+fastapi
+mangum
+bcrypt==4.0.1

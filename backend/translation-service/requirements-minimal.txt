@@ -1,0 +1,5 @@
+# Minimal requirements for testing with MOCK mode
+fastapi==0.104.1
+mangum==0.17.0
+pydantic==2.5.0
+boto3>=1.34.0

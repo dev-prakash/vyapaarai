@@ -1,0 +1,51 @@
+# Environment files
+.env.production
+.env.local
+.env.staging
+
+# Deployment artifacts
+*.zip
+lambda-deploy/
+dist/
+
+# AWS credentials and config
+.aws/
+aws-credentials.json
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node modules (if any)
+node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# CloudFormation templates (if generated)
+*.template
+*.yaml
+*.yml
+
+# Backup files
+*.bak
+*.backup
+
+
+

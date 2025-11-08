@@ -1,0 +1,198 @@
+# AWS SAM Configuration for VyaparAI
+# Alternative deployment method using AWS SAM
+
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "vyaparai-api"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-XXXXXXXXXXXX"
+s3_prefix = "vyaparai-api"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=dev"
+image_repositories = []
+
+[default.build]
+[default.build.parameters]
+use_container = true
+cached = true
+parallel = true
+
+[default.local_start_api]
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = false
+env_vars = "env.json"
+
+[default.local_start_lambda]
+[default.local_start_lambda.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = false
+env_vars = "env.json"
+
+# Development environment
+[dev]
+[dev.deploy]
+[dev.deploy.parameters]
+stack_name = "vyaparai-api-dev"
+s3_bucket = "vyaparai-sam-deployments-dev"
+s3_prefix = "vyaparai-api-dev"
+region = "ap-south-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=dev"
+image_repositories = []
+
+[dev.build]
+[dev.build.parameters]
+use_container = true
+cached = true
+parallel = true
+
+[dev.local_start_api]
+[dev.local_start_api.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = true
+env_vars = "env-dev.json"
+
+[dev.local_start_lambda]
+[dev.local_start_lambda.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = true
+env_vars = "env-dev.json"
+
+# Staging environment
+[staging]
+[staging.deploy]
+[staging.deploy.parameters]
+stack_name = "vyaparai-api-staging"
+s3_bucket = "vyaparai-sam-deployments-staging"
+s3_prefix = "vyaparai-api-staging"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=staging"
+image_repositories = []
+
+[staging.build]
+[staging.build.parameters]
+use_container = true
+cached = true
+parallel = true
+
+[staging.local_start_api]
+[staging.local_start_api.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = false
+env_vars = "env-staging.json"
+
+[staging.local_start_lambda]
+[staging.local_start_lambda.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = false
+env_vars = "env-staging.json"
+
+# Production environment
+[prod]
+[prod.deploy]
+[prod.deploy.parameters]
+stack_name = "vyaparai-api-prod"
+s3_bucket = "vyaparai-sam-deployments-prod"
+s3_prefix = "vyaparai-api-prod"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = "Environment=prod"
+image_repositories = []
+
+[prod.build]
+[prod.build.parameters]
+use_container = true
+cached = true
+parallel = true
+
+[prod.local_start_api]
+[prod.local_start_api.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = false
+env_vars = "env-prod.json"
+
+[prod.local_start_lambda]
+[prod.local_start_lambda.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = false
+env_vars = "env-prod.json"
+
+# Testing environment
+[test]
+[test.deploy]
+[test.deploy.parameters]
+stack_name = "vyaparai-api-test"
+s3_bucket = "vyaparai-sam-deployments-test"
+s3_prefix = "vyaparai-api-test"
+region = "ap-south-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=test"
+image_repositories = []
+
+[test.build]
+[test.build.parameters]
+use_container = true
+cached = true
+parallel = true
+
+[test.local_start_api]
+[test.local_start_api.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = true
+env_vars = "env-test.json"
+
+[test.local_start_lambda]
+[test.local_start_lambda.parameters]
+warm_containers = "EAGER"
+container_host = "localhost"
+container_port = 3000
+host = "127.0.0.1"
+port = 3000
+debug = true
+env_vars = "env-test.json"

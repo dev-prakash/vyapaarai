@@ -1,0 +1,314 @@
+{
+  "permissions": [
+    {
+      "permission_id": "PERM_PRODUCT_CREATE",
+      "name": "Create Products",
+      "description": "Allows user to create new products in the catalog",
+      "category": "product_management",
+      "resource": "products",
+      "action": "create",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_PRODUCT_READ",
+      "name": "View Products",
+      "description": "Allows user to view products in the catalog",
+      "category": "product_management",
+      "resource": "products",
+      "action": "read",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_PRODUCT_UPDATE",
+      "name": "Update Products",
+      "description": "Allows user to update existing products",
+      "category": "product_management",
+      "resource": "products",
+      "action": "update",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_PRODUCT_DELETE",
+      "name": "Delete Products",
+      "description": "Allows user to delete products from catalog",
+      "category": "product_management",
+      "resource": "products",
+      "action": "delete",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_PRODUCT_EXPORT",
+      "name": "Export Products",
+      "description": "Allows user to export product data",
+      "category": "product_management",
+      "resource": "products",
+      "action": "export",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_PRODUCT_IMPORT_BULK",
+      "name": "Bulk Import Products",
+      "description": "Allows user to import products in bulk via CSV/Excel",
+      "category": "product_management",
+      "resource": "products",
+      "action": "import",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_PRODUCT_UPDATE_REGIONAL_NAMES",
+      "name": "Update Product Regional Names",
+      "description": "Allows user to add and edit regional language names for global products",
+      "category": "product_management",
+      "resource": "products",
+      "action": "update_regional_names",
+      "status": "active",
+      "created_at": "2025-10-02T19:54:00Z"
+    },
+    {
+      "permission_id": "PERM_USER_CREATE",
+      "name": "Create Users",
+      "description": "Allows creating new user accounts",
+      "category": "user_management",
+      "resource": "users",
+      "action": "create",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_USER_READ",
+      "name": "View Users",
+      "description": "Allows viewing user accounts and details",
+      "category": "user_management",
+      "resource": "users",
+      "action": "read",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_USER_UPDATE",
+      "name": "Update Users",
+      "description": "Allows updating user account information",
+      "category": "user_management",
+      "resource": "users",
+      "action": "update",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_USER_DELETE",
+      "name": "Delete Users",
+      "description": "Allows deleting user accounts",
+      "category": "user_management",
+      "resource": "users",
+      "action": "delete",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_USER_ASSIGN_ROLES",
+      "name": "Assign Roles to Users",
+      "description": "Allows assigning roles to user accounts",
+      "category": "user_management",
+      "resource": "users",
+      "action": "assign_roles",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_USER_ASSIGN_PERMISSIONS",
+      "name": "Assign Permissions to Users",
+      "description": "Allows directly assigning permissions to users",
+      "category": "user_management",
+      "resource": "users",
+      "action": "assign_permissions",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_ROLE_CREATE",
+      "name": "Create Roles",
+      "description": "Allows creating new role definitions",
+      "category": "role_management",
+      "resource": "roles",
+      "action": "create",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_ROLE_READ",
+      "name": "View Roles",
+      "description": "Allows viewing role definitions",
+      "category": "role_management",
+      "resource": "roles",
+      "action": "read",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_ROLE_UPDATE",
+      "name": "Update Roles",
+      "description": "Allows updating role definitions and permissions",
+      "category": "role_management",
+      "resource": "roles",
+      "action": "update",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_ROLE_DELETE",
+      "name": "Delete Roles",
+      "description": "Allows deleting role definitions",
+      "category": "role_management",
+      "resource": "roles",
+      "action": "delete",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_ANALYTICS_VIEW",
+      "name": "View Analytics",
+      "description": "Allows viewing analytics and dashboards",
+      "category": "analytics",
+      "resource": "analytics",
+      "action": "read",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_REPORTS_GENERATE",
+      "name": "Generate Reports",
+      "description": "Allows generating system reports",
+      "category": "analytics",
+      "resource": "reports",
+      "action": "create",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_REPORTS_EXPORT",
+      "name": "Export Reports",
+      "description": "Allows exporting reports to various formats",
+      "category": "analytics",
+      "resource": "reports",
+      "action": "export",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_SETTINGS_VIEW",
+      "name": "View Settings",
+      "description": "Allows viewing system settings",
+      "category": "settings",
+      "resource": "settings",
+      "action": "read",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_SETTINGS_UPDATE",
+      "name": "Update Settings",
+      "description": "Allows updating system settings",
+      "category": "settings",
+      "resource": "settings",
+      "action": "update",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "permission_id": "PERM_SYSTEM_CONFIG",
+      "name": "System Configuration",
+      "description": "Full system configuration access",
+      "category": "settings",
+      "resource": "system",
+      "action": "configure",
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    }
+  ],
+  "roles": [
+    {
+      "role_id": "ROLE_SUPER_ADMIN",
+      "role_name": "Super Administrator",
+      "description": "Full system access with all permissions",
+      "permissions": ["*"],
+      "hierarchy_level": 1,
+      "is_system_role": true,
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "role_id": "ROLE_ADMIN",
+      "role_name": "Administrator",
+      "description": "Administrative access to most features",
+      "permissions": [
+        "PERM_PRODUCT_CREATE",
+        "PERM_PRODUCT_READ",
+        "PERM_PRODUCT_UPDATE",
+        "PERM_PRODUCT_DELETE",
+        "PERM_PRODUCT_EXPORT",
+        "PERM_PRODUCT_IMPORT_BULK",
+        "PERM_PRODUCT_UPDATE_REGIONAL_NAMES",
+        "PERM_USER_READ",
+        "PERM_USER_UPDATE",
+        "PERM_ANALYTICS_VIEW",
+        "PERM_REPORTS_GENERATE",
+        "PERM_REPORTS_EXPORT",
+        "PERM_SETTINGS_VIEW"
+      ],
+      "hierarchy_level": 10,
+      "is_system_role": true,
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "role_id": "ROLE_STORE_MANAGER",
+      "role_name": "Store Manager",
+      "description": "Manage store operations and inventory",
+      "permissions": [
+        "PERM_PRODUCT_READ",
+        "PERM_PRODUCT_UPDATE",
+        "PERM_PRODUCT_EXPORT",
+        "PERM_ANALYTICS_VIEW",
+        "PERM_REPORTS_GENERATE"
+      ],
+      "hierarchy_level": 20,
+      "is_system_role": true,
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "role_id": "ROLE_CATALOG_EDITOR",
+      "role_name": "Catalog Editor",
+      "description": "Edit and manage product catalog",
+      "permissions": [
+        "PERM_PRODUCT_CREATE",
+        "PERM_PRODUCT_READ",
+        "PERM_PRODUCT_UPDATE",
+        "PERM_PRODUCT_EXPORT"
+      ],
+      "hierarchy_level": 30,
+      "is_system_role": false,
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    },
+    {
+      "role_id": "ROLE_VIEWER",
+      "role_name": "Viewer",
+      "description": "Read-only access to view data",
+      "permissions": [
+        "PERM_PRODUCT_READ",
+        "PERM_ANALYTICS_VIEW"
+      ],
+      "hierarchy_level": 50,
+      "is_system_role": false,
+      "status": "active",
+      "created_at": "2025-10-02T18:35:00Z"
+    }
+  ]
+}
