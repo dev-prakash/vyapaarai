@@ -1493,17 +1493,26 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
                 order.payment_gateway_response = json.dumps(cod_result.get("gateway_response", {}))
 
         # Save order to DynamoDB
+        # Convert items to DynamoDB-compatible format with Decimal types
+        dynamodb_items = []
+        for item in order_data.items:
+            item_dict = item.dict()
+            # Convert float values to Decimal for DynamoDB
+            item_dict['unit_price'] = Decimal(str(item_dict['unit_price']))
+            item_dict['quantity'] = int(item_dict['quantity'])
+            dynamodb_items.append(item_dict)
+
         order_data_obj = OrderData(
             order_id=order_id,
             customer_phone=order_data.customer_phone,
             store_id=order_data.store_id,
-            items=[item.dict() for item in order_data.items],
-            total_amount=float(total_amount),
+            items=dynamodb_items,
+            total_amount=Decimal(str(total_amount)),  # Convert to Decimal for DynamoDB
             status=OrderStatus.PENDING.value,
             channel=order_data.channel,
             language=order_data.language,
             intent="checkout",  # Marketplace checkout intent
-            confidence=1.0,  # Direct checkout has 100% confidence
+            confidence=Decimal("1.0"),  # Convert to Decimal for DynamoDB
             entities=[],  # No NLP entities for direct checkout
             created_at=order.created_at.isoformat(),
             updated_at=order.updated_at.isoformat()

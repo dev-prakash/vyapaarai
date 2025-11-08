@@ -1,18 +1,16 @@
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException
 import asyncio
 from datetime import datetime
 import os
 import psutil
 import platform
 
-from app.database.session import get_db
 from app.core.config import settings
 
 router = APIRouter()
 
 @router.get("/health")
-async def detailed_health_check(db: Session = Depends(get_db)):
+async def detailed_health_check():
     """
     Comprehensive health check endpoint
     Returns detailed system health information
@@ -27,24 +25,10 @@ async def detailed_health_check(db: Session = Depends(get_db)):
     }
     
     overall_healthy = True
-    
-    # Database connectivity check (PostgreSQL)
-    try:
-        db.execute("SELECT 1").fetchone()
-        health_status["checks"]["database"] = {
-            "status": "healthy",
-            "message": "PostgreSQL connection successful",
-            "type": "postgresql"
-        }
-    except Exception as e:
-        health_status["checks"]["database"] = {
-            "status": "unhealthy",
-            "message": f"Database connection failed: {str(e)}",
-            "type": "postgresql",
-            "error": str(e)
-        }
-        overall_healthy = False
-    
+
+    # NOTE: PostgreSQL check removed - using HybridDatabase instead
+    # Database connectivity check can be added later if needed
+
     # DynamoDB check
     try:
         import boto3

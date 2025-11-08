@@ -22,7 +22,8 @@ import uvicorn
 from app.api.v1 import api_v1_router
 from app.api.v1 import health
 from app.middleware.rate_limit import initialize_redis, close_redis, rate_limit_middleware
-from app.services.unified_order_service import unified_order_service
+# NOTE: unified_order_service removed after AI archival
+# from app.services.unified_order_service import unified_order_service
 from app.core.exceptions import vyaparai_exception_handler, VyaparAIException
 
 # Configure logging
@@ -312,22 +313,23 @@ async def detailed_health_check():
     }
     
     # Check services
-    try:
-        # Check unified order service
-        metrics = unified_order_service.get_metrics()
-        health_status["services"]["unified_order_service"] = {
-            "status": "healthy",
-            "total_requests": metrics["total_requests"],
-            "avg_processing_time_ms": metrics["avg_processing_time"],
-            "error_rate": (metrics["error_count"] / max(metrics["total_requests"], 1)) * 100
-        }
-    except Exception as e:
-        health_status["services"]["unified_order_service"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-        health_status["status"] = "degraded"
-    
+    # NOTE: unified_order_service check removed after AI archival
+    # try:
+    #     # Check unified order service
+    #     metrics = unified_order_service.get_metrics()
+    #     health_status["services"]["unified_order_service"] = {
+    #         "status": "healthy",
+    #         "total_requests": metrics["total_requests"],
+    #         "avg_processing_time_ms": metrics["avg_processing_time"],
+    #         "error_rate": (metrics["error_count"] / max(metrics["total_requests"], 1)) * 100
+    #     }
+    # except Exception as e:
+    #     health_status["services"]["unified_order_service"] = {
+    #         "status": "unhealthy",
+    #         "error": str(e)
+    #     }
+    #     health_status["status"] = "degraded"
+
     # Check Redis
     try:
         from middleware.rate_limit import redis_client
@@ -343,33 +345,34 @@ async def detailed_health_check():
         }
         health_status["status"] = "degraded"
     
-    # Check Gemini
-    try:
-        if hasattr(unified_order_service, 'gemini_model') and unified_order_service.gemini_model:
-            health_status["services"]["gemini"] = {"status": "healthy"}
-        else:
-            health_status["services"]["gemini"] = {"status": "not_configured"}
-    except Exception as e:
-        health_status["services"]["gemini"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-        health_status["status"] = "degraded"
-    
-    # Check Google Translate
-    try:
-        from services.indian_multilingual_service import indian_multilingual_service
-        if hasattr(indian_multilingual_service, 'translate_client') and indian_multilingual_service.translate_client:
-            health_status["services"]["google_translate"] = {"status": "healthy"}
-        else:
-            health_status["services"]["google_translate"] = {"status": "not_configured"}
-    except Exception as e:
-        health_status["services"]["google_translate"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-        health_status["status"] = "degraded"
-    
+    # NOTE: Gemini and Google Translate checks removed after AI archival
+    # # Check Gemini
+    # try:
+    #     if hasattr(unified_order_service, 'gemini_model') and unified_order_service.gemini_model:
+    #         health_status["services"]["gemini"] = {"status": "healthy"}
+    #     else:
+    #         health_status["services"]["gemini"] = {"status": "not_configured"}
+    # except Exception as e:
+    #     health_status["services"]["gemini"] = {
+    #         "status": "unhealthy",
+    #         "error": str(e)
+    #     }
+    #     health_status["status"] = "degraded"
+    #
+    # # Check Google Translate
+    # try:
+    #     from services.indian_multilingual_service import indian_multilingual_service
+    #     if hasattr(indian_multilingual_service, 'translate_client') and indian_multilingual_service.translate_client:
+    #         health_status["services"]["google_translate"] = {"status": "healthy"}
+    #     else:
+    #         health_status["services"]["google_translate"] = {"status": "not_configured"}
+    # except Exception as e:
+    #     health_status["services"]["google_translate"] = {
+    #         "status": "unhealthy",
+    #         "error": str(e)
+    #     }
+    #     health_status["status"] = "degraded"
+
     return health_status
 
 # =============================================================================
@@ -542,13 +545,14 @@ if DEBUG:
                 "REDIS_URL": REDIS_URL,
                 "GOOGLE_API_KEY": "***" if GOOGLE_API_KEY else None,
                 "GOOGLE_TRANSLATE_API_KEY": "***" if GOOGLE_TRANSLATE_API_KEY else None
-            },
-            "services": {
-                "unified_order_service": {
-                    "metrics": unified_order_service.get_metrics(),
-                    "performance": unified_order_service.get_performance_summary()
-                }
             }
+            # NOTE: unified_order_service metrics removed after AI archival
+            # "services": {
+            #     "unified_order_service": {
+            #         "metrics": unified_order_service.get_metrics(),
+            #         "performance": unified_order_service.get_performance_summary()
+            #     }
+            # }
         }
 
 # =============================================================================

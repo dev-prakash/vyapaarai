@@ -13,10 +13,9 @@ from ulid import ULID
 
 # Database dependencies
 from app.database.hybrid_db import HybridDatabase
-from app.core.config import get_settings
+from app.core.config import settings
 
 router = APIRouter(prefix="/api/v1/stores", tags=["stores"])
-settings = get_settings()
 
 # Initialize database
 db = HybridDatabase()

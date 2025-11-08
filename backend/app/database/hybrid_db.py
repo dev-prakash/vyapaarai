@@ -22,7 +22,8 @@ import asyncpg
 from asyncpg.exceptions import PostgresError
 
 # Local imports
-from ..services.unified_order_service import OrderProcessingResult
+# NOTE: OrderProcessingResult import removed - it was only used by AI service methods
+# from ..services.unified_order_service import OrderProcessingResult
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +108,16 @@ class HybridDatabase:
     def _initialize_dynamodb(self):
         """Initialize DynamoDB client"""
         try:
-            self.dynamodb = boto3.resource('dynamodb', region_name='ap-south-1')
-            logger.info("DynamoDB client initialized successfully")
+            from ..core.config import settings
+
+            kwargs = {'region_name': settings.AWS_REGION}
+
+            # Use endpoint if specified (for LocalStack)
+            if settings.DYNAMODB_ENDPOINT:
+                kwargs['endpoint_url'] = settings.DYNAMODB_ENDPOINT
+
+            self.dynamodb = boto3.resource('dynamodb', **kwargs)
+            logger.info(f"DynamoDB client initialized successfully (region: {settings.AWS_REGION})")
         except NoCredentialsError:
             logger.error("AWS credentials not found")
             self.dynamodb = None
@@ -150,14 +159,17 @@ class HybridDatabase:
 
     def _build_table_names(self):
         """Build table names from environment variables"""
+        from ..core.config import settings
+
         self.table_names = {
-            'orders': os.getenv('DYNAMODB_ORDERS_TABLE', 'vyaparai-orders-dev'),
+            'orders': settings.DYNAMODB_ORDERS_TABLE,
             'sessions': os.getenv('DYNAMODB_SESSIONS_TABLE', 'vyaparai-sessions-dev'),
             'rate_limits': os.getenv('DYNAMODB_RATE_LIMITS_TABLE', 'vyaparai-rate-limits-dev'),
-            'stores': os.getenv('DYNAMODB_STORES_TABLE', 'vyaparai-stores-dev'),
+            'stores': settings.DYNAMODB_STORES_TABLE,
             'products': os.getenv('DYNAMODB_PRODUCTS_TABLE', 'vyaparai-products-dev'),
             'metrics': os.getenv('DYNAMODB_METRICS_TABLE', 'vyaparai-metrics-dev')
         }
+        logger.info(f"DynamoDB table names configured: {self.table_names}")
 
     # DynamoDB Operations
 
@@ -174,21 +186,18 @@ class HybridDatabase:
             )
 
         try:
-            table = self.dynamodb.Table(self.table_names['orders'])
-            
+            table_name = self.table_names['orders']
+            logger.info(f"Attempting to save order to DynamoDB table: {table_name}")
+            table = self.dynamodb.Table(table_name)
+
             # Prepare item for DynamoDB
+            # NOTE: Actual table schema uses store_id (HASH) and id (RANGE) as primary key
+            # Not the pk/sk pattern that was originally designed
             item = {
-                'pk': f"ORDER#{order_data.order_id}",
-                'sk': f"CUSTOMER#{order_data.customer_phone}",
-                'gsi1pk': f"STORE#{order_data.store_id}",
-                'gsi1sk': order_data.created_at,
-                'gsi2pk': f"STATUS#{order_data.status}",
-                'gsi2sk': order_data.created_at,
-                'gsi3pk': f"CHANNEL#{order_data.channel}",
-                'gsi3sk': order_data.created_at,
-                'order_id': order_data.order_id,
+                'id': order_data.order_id,  # RANGE key (sort key)
+                'store_id': order_data.store_id,  # HASH key (partition key)
+                'customer_id': order_data.customer_phone,  # Used by GSI
                 'customer_phone': order_data.customer_phone,
-                'store_id': order_data.store_id,
                 'items': order_data.items,
                 'total_amount': order_data.total_amount,
                 'status': order_data.status,
@@ -819,59 +828,60 @@ class HybridDatabase:
                 source="postgresql"
             )
 
-    async def process_order_with_analytics(self, order_result: OrderProcessingResult, store_id: str) -> HybridOrderResult:
-        """Process order and update analytics in both databases"""
-        start_time = time.time()
-        
-        try:
-            # Create order in DynamoDB
-            order_data = OrderData(
-                order_id=str(uuid.uuid4()),
-                customer_phone="",  # Extract from order_result
-                store_id=store_id,
-                items=order_result.entities,
-                total_amount=0.0,  # Calculate from items
-                status="pending",
-                channel=order_result.channel_format,
-                language=order_result.language,
-                intent=order_result.intent,
-                confidence=order_result.confidence,
-                entities=order_result.entities,
-                created_at=datetime.utcnow().isoformat(),
-                updated_at=datetime.utcnow().isoformat()
-            )
-            
-            # Calculate total using PostgreSQL
-            total_result = await self.calculate_order_total(order_data.items, store_id)
-            if total_result.success:
-                order_data.total_amount = total_result.data['total']
-                order_data.items = total_result.data['items']
-            
-            # Save to DynamoDB
-            db_result = await self.create_order(order_data)
-            
-            if db_result.success:
-                return HybridOrderResult(
-                    success=True,
-                    data={
-                        'order_id': order_data.order_id,
-                        'total_amount': order_data.total_amount,
-                        'items': order_data.items
-                    },
-                    processing_time_ms=(time.time() - start_time) * 1000,
-                    source="hybrid"
-                )
-            else:
-                return db_result
-
-        except Exception as e:
-            logger.error(f"Error processing order with analytics: {e}")
-            return HybridOrderResult(
-                success=False,
-                error=str(e),
-                processing_time_ms=(time.time() - start_time) * 1000,
-                source="hybrid"
-            )
+    # NOTE: AI-only method commented out after archival
+    # async def process_order_with_analytics(self, order_result: OrderProcessingResult, store_id: str) -> HybridOrderResult:
+    #     """Process order and update analytics in both databases"""
+    #     start_time = time.time()
+    #
+    #     try:
+    #         # Create order in DynamoDB
+    #         order_data = OrderData(
+    #             order_id=str(uuid.uuid4()),
+    #             customer_phone="",  # Extract from order_result
+    #             store_id=store_id,
+    #             items=order_result.entities,
+    #             total_amount=0.0,  # Calculate from items
+    #             status="pending",
+    #             channel=order_result.channel_format,
+    #             language=order_result.language,
+    #             intent=order_result.intent,
+    #             confidence=order_result.confidence,
+    #             entities=order_result.entities,
+    #             created_at=datetime.utcnow().isoformat(),
+    #             updated_at=datetime.utcnow().isoformat()
+    #         )
+    #
+    #         # Calculate total using PostgreSQL
+    #         total_result = await self.calculate_order_total(order_data.items, store_id)
+    #         if total_result.success:
+    #             order_data.total_amount = total_result.data['total']
+    #             order_data.items = total_result.data['items']
+    #
+    #         # Save to DynamoDB
+    #         db_result = await self.create_order(order_data)
+    #
+    #         if db_result.success:
+    #             return HybridOrderResult(
+    #                 success=True,
+    #                 data={
+    #                     'order_id': order_data.order_id,
+    #                     'total_amount': order_data.total_amount,
+    #                     'items': order_data.items
+    #                 },
+    #                 processing_time_ms=(time.time() - start_time) * 1000,
+    #                 source="hybrid"
+    #             )
+    #         else:
+    #             return db_result
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error processing order with analytics: {e}")
+    #         return HybridOrderResult(
+    #             success=False,
+    #             error=str(e),
+    #             processing_time_ms=(time.time() - start_time) * 1000,
+    #             source="hybrid"
+    #         )
 
     async def close(self):
         """Close database connections"""
