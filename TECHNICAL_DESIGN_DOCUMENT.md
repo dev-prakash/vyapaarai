@@ -1,27 +1,40 @@
 # VyaparAI - Technical Design Document
 
-**Version:** 1.0
-**Date:** October 8, 2025
+**Version:** 2.1
+**Date:** January 6, 2026
 **Status:** Production
 **Document Owner:** Development Team
 
 ---
 
+## Change History
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 2.1 | Jan 6, 2026 | Dev Prakash | Added Section 9.5 Enterprise Token Management (Frontend) - centralized tokenManager, multi-tab sync, idle timeout |
+| 2.0 | Dec 23, 2025 | Dev Team | Initial production release |
+
+---
+
 ## Table of Contents
 
-1. [Executive Summary](#executive-summary)
-2. [System Overview](#system-overview)
-3. [Architecture](#architecture)
-4. [Technology Stack](#technology-stack)
-5. [Database Design](#database-design)
-6. [API Specification](#api-specification)
-7. [Frontend Architecture](#frontend-architecture)
-8. [Security & Authentication](#security--authentication)
-9. [Core Features](#core-features)
-10. [Integration Points](#integration-points)
-11. [Deployment Architecture](#deployment-architecture)
-12. [Future Roadmap](#future-roadmap)
-13. [Appendices](#appendices)
+1. [Executive Summary](#1-executive-summary)
+2. [System Overview](#2-system-overview)
+3. [Architecture](#3-architecture)
+4. [Technology Stack](#4-technology-stack)
+5. [Database Design](#5-database-design)
+6. [Backend Architecture](#6-backend-architecture)
+7. [Frontend Architecture](#7-frontend-architecture)
+8. [API Specification](#8-api-specification)
+9. [Security & Authentication](#9-security--authentication)
+10. [Real-Time Features](#10-real-time-features)
+11. [Payment Integration](#11-payment-integration)
+12. [Deployment Architecture](#12-deployment-architecture)
+13. [Customer Experience](#13-customer-experience)
+14. [Store Owner Features](#14-store-owner-features)
+15. [Admin Features](#15-admin-features)
+16. [Future Roadmap](#16-future-roadmap)
+17. [Appendices](#17-appendices)
 
 ---
 
@@ -29,34 +42,59 @@
 
 ### 1.1 Project Overview
 
-**VyaparAI** is an AI-powered inventory and order management platform designed for Indian retail stores (kirana shops). The platform provides:
+**VyaparAI** is an enterprise-grade AI-powered inventory and order management platform designed for Indian retail stores (kirana shops). The platform operates as a B2B2C marketplace connecting store owners with customers.
 
-- Intelligent product catalog management
-- Real-time inventory tracking
+**Core Capabilities:**
+- Real-time inventory management with DynamoDB
+- Multi-channel order processing (Web, WhatsApp, RCS)
+- Progressive Web App (PWA) with offline support
 - Multi-language support (10+ Indian languages)
 - AI-powered product matching and deduplication
-- Progressive Web App (PWA) for offline functionality
-- Automated order processing
+- Enterprise WebSocket real-time notifications
+- Razorpay payment integration
+- Transactional order processing with Saga pattern
 
 ### 1.2 Business Value
 
-- **Efficiency**: Reduce inventory management time by 70%
-- **Accuracy**: AI-powered product matching reduces duplicates by 95%
-- **Accessibility**: Multi-language support in 10+ Indian languages
-- **Cost**: Serverless architecture reduces infrastructure costs by 80%
-- **Scale**: Built to handle 1M+ products and 100K+ stores
-
-### 1.3 Project Metrics
-
 | Metric | Value |
 |--------|-------|
-| Total API Endpoints | 68 |
-| Frontend Pages | 47 |
-| Services | 17 |
-| DynamoDB Tables | 9 |
+| Efficiency | Reduce inventory management time by 70% |
+| Accuracy | AI-powered product matching reduces duplicates by 95% |
+| Accessibility | Multi-language support in 10+ Indian languages |
+| Cost | Serverless architecture reduces infrastructure costs by 80% |
+| Scale | Built to handle 1M+ products and 100K+ stores |
+
+### 1.3 Project Metrics (December 2025)
+
+| Metric | Value |
+|--------|----------|
+| Total API Endpoints | 85+ |
+| Backend Endpoint Modules | 18 modules |
+| Frontend Pages | 70+ pages |
+| Frontend Components | 40+ component categories |
+| Frontend Services | 28 API services |
+| Custom React Hooks | 13 hooks |
+| DynamoDB Tables | 11 tables |
 | Supported Languages | 10+ |
-| Lines of Backend Code | ~5,554 |
+| Lines of Backend Code | ~15,000+ |
+| Lines of Frontend Code | ~50,000+ |
 | Deployment Region | AWS ap-south-1 (Mumbai) |
+| Project Completion | ~85% |
+
+### 1.4 Current Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Backend API | Production | Lambda + API Gateway |
+| Frontend PWA | Production | CloudFront + S3 |
+| DynamoDB Integration | Complete | 11 tables operational |
+| Order Management | Complete | Saga pattern implemented |
+| Inventory Management | Complete | Real-time stock tracking |
+| Customer Portal | Complete | Full shopping flow |
+| Store Owner Dashboard | Complete | Enhanced dashboard |
+| Payment Integration | Partial | Razorpay integrated, mock mode |
+| WebSocket Notifications | Complete | Real-time order alerts |
+| Settlement System | Not Started | B2B2C marketplace feature |
 
 ---
 
@@ -65,78 +103,88 @@
 ### 2.1 High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         CLIENT LAYER                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  Web Browser │  │ Mobile PWA   │  │Chrome Ext.   │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      CDN & API GATEWAY                       │
-│         CloudFront + API Gateway HTTP API v2                 │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     COMPUTE LAYER                            │
-│  ┌──────────────────────────────────────────────┐           │
-│  │  AWS Lambda (FastAPI + Mangum)               │           │
-│  │  - Authentication                            │           │
-│  │  - Inventory Management                      │           │
-│  │  - Order Processing                          │           │
-│  │  - Admin Operations                          │           │
-│  └──────────────────────────────────────────────┘           │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      DATA LAYER                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  DynamoDB    │  │  S3 Storage  │  │  SES Email   │      │
-│  │  (9 Tables)  │  │  (Images)    │  │  Service     │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   EXTERNAL INTEGRATIONS                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │ Google       │  │  Razorpay    │  │ WhatsApp     │      │
-│  │ Gemini AI    │  │  Payment     │  │  Business    │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              CLIENT LAYER                                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  Web Browser │  │  Mobile PWA  │  │Chrome Extens.│  │  WhatsApp    │   │
+│  │  (React 18)  │  │  (Installable)│  │  (Scanner)   │  │  (Webhook)   │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           CDN & API GATEWAY                                  │
+│  ┌────────────────────────────┐  ┌────────────────────────────────────┐    │
+│  │  CloudFront (E1UY93SVXV8QOF)│  │  API Gateway (jxxi8dtx1f)        │    │
+│  │  www.vyapaarai.com         │  │  HTTP API v2 + WebSocket API      │    │
+│  └────────────────────────────┘  └────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            COMPUTE LAYER                                     │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │                  AWS Lambda (vyaparai-backend-prod)                 │    │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │    │
+│  │  │   FastAPI    │  │   Mangum     │  │   Services   │              │    │
+│  │  │   Router     │  │   Adapter    │  │   Layer      │              │    │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘              │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │            WebSocket Lambda (vyaparai-websocket-handler)            │    │
+│  │  - Connection management  - Order broadcast  - DynamoDB Streams     │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              DATA LAYER                                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  DynamoDB    │  │  PostgreSQL  │  │  S3 Storage  │  │    Redis     │   │
+│  │  (11 Tables) │  │  (Analytics) │  │  (Images)    │  │  (Rate Limit)│   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        EXTERNAL INTEGRATIONS                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  Razorpay    │  │  Google Maps │  │  Firebase    │  │  WhatsApp    │   │
+│  │  Payments    │  │  Geocoding   │  │  FCM         │  │  Business    │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 System Components
 
 #### **Frontend Layer**
-- **React PWA**: Progressive Web App with offline support
-- **Chrome Extension**: Browser-based quick actions
+- **React PWA**: Progressive Web App with offline support, service worker caching
+- **Chrome Extension**: Browser-based quick actions and barcode scanning
 - **Mobile Scanner**: Native camera access for barcode scanning
+- **Multi-language**: 10+ Indian languages via i18next
 
 #### **API Layer**
-- **API Gateway**: AWS API Gateway HTTP API v2
-- **CloudFront**: Global CDN for static assets
-- **CORS**: Cross-origin resource sharing configuration
+- **API Gateway HTTP API v2**: REST API management with CORS
+- **API Gateway WebSocket API**: Real-time bidirectional communication
+- **CloudFront**: Global CDN for static assets and caching
 
 #### **Business Logic Layer**
-- **FastAPI Application**: REST API endpoints
-- **Mangum Adapter**: ASGI to Lambda handler
-- **Service Layer**: Business logic services
-- **Worker Processes**: Background job processing
+- **FastAPI Application**: Python REST API framework
+- **Mangum Adapter**: ASGI to Lambda handler bridge
+- **Service Layer**: Business logic services (inventory, orders, payments)
+- **Saga Pattern**: Transactional order processing with compensating transactions
 
 #### **Data Layer**
-- **DynamoDB**: Primary NoSQL database (9 tables)
+- **DynamoDB**: Primary NoSQL database (11 tables, on-demand mode)
+- **PostgreSQL**: Analytics and complex queries (RDS)
 - **S3**: Object storage for images and files
-- **SES**: Email delivery service
+- **Redis**: Rate limiting and caching
 
 #### **Integration Layer**
-- **Google Gemini AI**: Product description generation
-- **Razorpay**: Payment processing
-- **WhatsApp Business**: Order notifications
-- **Open Food Facts**: Product data enrichment
+- **Razorpay**: Payment processing (UPI, Cards, Wallets, COD)
+- **Google Maps**: Geocoding for store discovery
+- **Firebase**: Push notifications via FCM
+- **WhatsApp Business**: Order notifications and webhooks
 
 ---
 
@@ -144,51 +192,61 @@
 
 ### 3.1 Architecture Pattern
 
-**Pattern Type**: Serverless Microservices
-**Deployment Model**: Function as a Service (FaaS)
-**Data Model**: Event-driven NoSQL
+| Aspect | Choice |
+|--------|--------|
+| Pattern Type | Serverless Microservices |
+| Deployment Model | Function as a Service (FaaS) |
+| Data Model | Event-driven NoSQL + SQL hybrid |
+| Frontend | Single Page Application (SPA) / PWA |
+| Communication | REST API + WebSocket |
 
 ### 3.2 Design Principles
 
 1. **Serverless-First**: Zero server management, auto-scaling
-2. **Event-Driven**: Asynchronous processing for long-running tasks
+2. **Event-Driven**: DynamoDB Streams for real-time updates
 3. **API-First**: RESTful APIs with OpenAPI documentation
 4. **Mobile-First**: Responsive design, PWA capabilities
-5. **Security-First**: JWT authentication, encrypted storage
+5. **Security-First**: JWT authentication, CORS, rate limiting
 6. **Multi-Tenant**: Store-level data isolation
-7. **Scalable**: Horizontal scaling via Lambda concurrency
+7. **Transactional Safety**: Saga pattern for critical operations
 
 ### 3.3 Key Architectural Decisions
 
 #### **Decision 1: FastAPI + Lambda**
-- **Rationale**: FastAPI provides modern Python web framework with automatic OpenAPI docs
-- **Benefit**: Type safety, async support, high performance
+- **Rationale**: Modern Python framework with async support
+- **Benefit**: Type safety, auto OpenAPI docs, high performance
 - **Trade-off**: Cold start latency (~500ms)
 
-#### **Decision 2: DynamoDB over RDS**
-- **Rationale**: NoSQL better suits dynamic product attributes, auto-scaling
-- **Benefit**: Infinite scale, pay-per-request pricing
-- **Trade-off**: No complex queries, denormalized data
+#### **Decision 2: DynamoDB + PostgreSQL Hybrid**
+- **Rationale**: NoSQL for real-time operations, SQL for analytics
+- **Benefit**: Best of both worlds - scale + complex queries
+- **Trade-off**: Data consistency complexity
 
 #### **Decision 3: Monolithic Lambda**
-- **Rationale**: Simplified deployment, shared code, lower cold starts
-- **Benefit**: Faster development, easier debugging
-- **Trade-off**: Larger package size, all-or-nothing deployments
+- **Rationale**: Simplified deployment, shared code
+- **Benefit**: Lower cold starts, easier debugging
+- **Trade-off**: Larger package size (~37MB)
 
 #### **Decision 4: PWA over Native Apps**
-- **Rationale**: Single codebase, instant updates, offline support
+- **Rationale**: Single codebase, instant updates
 - **Benefit**: Lower development cost, wider reach
 - **Trade-off**: Limited native features
 
+#### **Decision 5: Saga Pattern for Orders**
+- **Rationale**: Transactional safety without distributed transactions
+- **Benefit**: Atomic stock + order creation with rollback
+- **Trade-off**: Implementation complexity
+
 ### 3.4 Scalability Strategy
 
-| Component | Scaling Method | Limit |
-|-----------|---------------|-------|
+| Component | Scaling Method | Current Limit |
+|-----------|---------------|---------------|
 | API Gateway | Auto-scale | 10,000 RPS |
-| Lambda | Concurrent executions | 1,000 (default) |
+| Lambda | Concurrent executions | 1,000 (configurable) |
 | DynamoDB | On-demand mode | Unlimited |
 | S3 | Unlimited | N/A |
 | CloudFront | Global CDN | Unlimited |
+| WebSocket | Connection-based | 500 concurrent |
 
 ---
 
@@ -197,39 +255,37 @@
 ### 4.1 Backend Stack
 
 #### **Core Framework**
-```python
-FastAPI      0.118.0  # Web framework
-Mangum       0.19.0   # ASGI to Lambda adapter
-Uvicorn      0.34.0   # ASGI server (local dev)
-Pydantic     2.11.4   # Data validation
+```
+FastAPI         0.118.0    # Web framework
+Mangum          0.19.0     # ASGI to Lambda adapter
+Uvicorn         0.34.0     # ASGI server (local dev)
+Pydantic        2.11.4     # Data validation
 ```
 
 #### **AWS SDK**
-```python
-boto3        1.40.45  # AWS SDK for Python
-botocore     1.35.89  # Low-level AWS interface
+```
+boto3           1.40.45    # AWS SDK for Python
+botocore        1.35.89    # Low-level AWS interface
 ```
 
 #### **Authentication & Security**
-```python
-PyJWT        2.10.1   # JSON Web Tokens
-bcrypt       5.0.0    # Password hashing
-python-jose  3.3.0    # JWT operations
-passlib      1.7.4    # Password utilities
+```
+PyJWT           2.10.1     # JSON Web Tokens
+bcrypt          5.0.0      # Password hashing
+python-jose     3.3.0      # JWT operations
+passlib         1.7.4      # Password utilities
+```
+
+#### **Payment Processing**
+```
+razorpay        2.0.0      # Payment gateway SDK
 ```
 
 #### **Data Processing**
-```python
-Pillow       11.3.0   # Image processing
-NumPy        2.3.3    # Numerical computing
-ImageHash    4.3.2    # Perceptual hashing
-pandas       2.2.3    # Data manipulation (CSV)
 ```
-
-#### **AI & ML**
-```python
-google-generativeai  0.8.4  # Google Gemini API
-openai               1.59.7 # OpenAI API (future)
+Pillow          11.3.0     # Image processing
+pandas          2.2.3      # Data manipulation (CSV)
+python-ulid     3.1.0      # ULID generation
 ```
 
 ### 4.2 Frontend Stack
@@ -249,28 +305,20 @@ openai               1.59.7 # OpenAI API (future)
   "@mui/material": "5.18.0",
   "@mui/icons-material": "5.18.0",
   "@mui/x-date-pickers": "7.20.0",
-  "@mui/x-data-grid": "7.20.0"
+  "@mui/x-data-grid": "7.20.0",
+  "tailwindcss": "3.4.0"
 }
 ```
 
 #### **State Management**
 ```json
 {
-  "zustand": "5.0.8",              // Global state
-  "@tanstack/react-query": "5.85.5" // Server state
+  "zustand": "5.0.8",
+  "@tanstack/react-query": "5.85.5"
 }
 ```
 
-#### **Routing & Forms**
-```json
-{
-  "react-router-dom": "7.8.1",
-  "react-hook-form": "7.54.2",
-  "yup": "1.6.1"
-}
-```
-
-#### **API & Data**
+#### **API & Real-time**
 ```json
 {
   "axios": "1.11.0",
@@ -278,11 +326,11 @@ openai               1.59.7 # OpenAI API (future)
 }
 ```
 
-#### **Internationalization**
+#### **Payment**
 ```json
 {
-  "i18next": "25.4.2",
-  "react-i18next": "15.2.3"
+  "razorpay": "2.9.6",
+  "react-razorpay": "3.0.1"
 }
 ```
 
@@ -294,807 +342,732 @@ openai               1.59.7 # OpenAI API (future)
 }
 ```
 
-### 4.3 Development Tools
-
-#### **Backend Development**
-```
-pytest           # Testing
-black            # Code formatting
-flake8           # Linting
-mypy             # Type checking
+#### **Internationalization**
+```json
+{
+  "i18next": "25.4.2",
+  "react-i18next": "15.2.3"
+}
 ```
 
-#### **Frontend Development**
-```
-ESLint           # Linting
-Prettier         # Code formatting
-TypeScript       # Type safety
-Vite             # Build tool
-```
+### 4.3 Infrastructure
 
-#### **Infrastructure**
 ```
 Terraform        # Infrastructure as Code
 AWS CLI          # AWS management
-Docker           # Containerization (optional)
+Docker           # Containerization
+GitHub Actions   # CI/CD
 ```
 
 ---
 
 ## 5. Database Design
 
-### 5.1 DynamoDB Tables
+### 5.1 DynamoDB Tables Overview
 
-#### **Table 1: vyaparai-stores-prod**
-**Purpose**: Store information and profiles
+| Table | Purpose | Primary Key | GSIs |
+|-------|---------|-------------|------|
+| vyaparai-stores-prod | Store profiles | store_id | email-index, region-index |
+| vyaparai-global-products-prod | Product catalog | product_id | barcode-index, category-index |
+| vyaparai-store-inventory-prod | Store inventory | store_id + product_id | store-active-index |
+| vyaparai-orders-prod | Orders | order_id | store-orders-index, status-index |
+| vyaparai-users-prod | User accounts | user_id | email-index |
+| vyaparai-sessions-prod | Auth sessions | email + session_id | - |
+| vyaparai-passcodes-prod | OTP codes | email | TTL enabled |
+| vyaparai-categories-prod | Categories | category_id | - |
+| vyaparai-bulk-upload-jobs-prod | CSV jobs | job_id | store-jobs-index |
+| vyaparai-customer-profiles-prod | Customers | customer_id | phone-index, email-index |
+| vyaparai-customer-carts-prod | Carts | customer_id + store_id | TTL: 30 min |
+| vyaparai-websocket-connections | WS connections | connectionId | storeId-index |
 
+### 5.2 Core Table Schemas
+
+#### **vyaparai-stores-prod**
 ```javascript
-Primary Key: store_id (String)
-
-Attributes:
 {
-  store_id: string,              // Unique store identifier
-  store_name: string,            // Store display name
-  owner_name: string,            // Owner full name
-  email: string,                 // Contact email (GSI)
-  phone: string,                 // Contact phone
+  store_id: string,              // Primary Key
+  store_name: string,
+  owner_name: string,
+  email: string,                 // GSI
+  phone: string,
   address: {
+    full: string,
     street: string,
     city: string,
     state: string,
-    pincode: string,
-    coordinates: {
-      latitude: number,
-      longitude: number
-    }
+    pincode: string
   },
-  region: string,                // State code (IN-MH, IN-TN, etc.)
-  business_type: string,         // kirana, supermarket, etc.
-  created_at: string,            // ISO timestamp
-  updated_at: string,
+  latitude: number,              // Auto-geocoded
+  longitude: number,             // Auto-geocoded
+  region: string,                // IN-MH, IN-TN, etc.
+  business_type: string,
+  category: string,
+  rating: number,
+  openingHours: string,
+  isOpen: boolean,
   status: string,                // active, inactive, suspended
-  settings: {
-    language: string,
-    currency: string,
-    timezone: string
-  }
-}
-
-Indexes:
-- GSI: email-index (email as partition key)
-- GSI: region-index (region as partition key)
-```
-
-#### **Table 2: vyaparai-global-products-prod**
-**Purpose**: Global product catalog (master data)
-
-```javascript
-Primary Key: product_id (String)
-
-Attributes:
-{
-  product_id: string,            // GP{timestamp} format
-  name: string,                  // Product name (English)
-  brand: string,                 // Brand name
-  category: string,              // Product category
-  subcategory: string,
-  barcode: string,               // EAN/UPC barcode (GSI)
-  image_hash: string,            // Perceptual hash (GSI)
-
-  canonical_image_urls: {
-    original: string,            // S3 URL
-    thumbnail: string,           // 150x150
-    medium: string,              // 500x500
-    large: string                // 1024x1024
-  },
-
-  regional_names: {
-    "IN-MH": ["मराठी नाव"],     // Maharashtra (Marathi)
-    "IN-TN": ["தமிழ் பெயர்"],    // Tamil Nadu (Tamil)
-    "IN-KA": ["ಕನ್ನಡ ಹೆಸರು"],   // Karnataka (Kannada)
-    "IN-AP": ["తెలుగు పేరు"],    // Andhra Pradesh (Telugu)
-    "IN-GJ": ["ગુજરાતી નામ"],   // Gujarat (Gujarati)
-    "IN-WB": ["বাংলা নাম"],      // West Bengal (Bengali)
-    "IN-KL": ["മലയാളം പേര്"],    // Kerala (Malayalam)
-    "IN-PB": ["ਪੰਜਾਬੀ ਨਾਮ"],    // Punjab (Punjabi)
-    "IN-RJ": ["राजस्थानी नाम"],  // Rajasthan (Hindi)
-    "IN-UP": ["हिन्दी नाम"]      // Uttar Pradesh (Hindi)
-  },
-
-  attributes: {
-    weight: string,              // "500g", "1kg", etc.
-    pack_size: string,
-    unit: string,                // pieces, kg, liters, etc.
-    manufacturer: string,
-    mrp: number,                 // Maximum Retail Price
-    hsn_code: string,            // HSN code for GST
-    nutritional_info: object
-  },
-
-  verification_status: string,   // pending, verified, flagged, admin_created
-  quality_score: number,         // 0-100
-  stores_using_count: number,    // Usage counter
-
-  created_by: string,            // user_id or 'system'
-  created_at: string,
-  updated_at: string,
-
-  metadata: {
-    source: string,              // manual, import, api
-    import_source: string,       // open-food-facts, etc.
-    last_reviewed_at: string,
-    last_reviewed_by: string
-  }
-}
-
-Indexes:
-- GSI: barcode-index (barcode as partition key)
-- GSI: image-hash-index (image_hash as partition key)
-- GSI: verification-status-index (verification_status as partition key)
-- GSI: category-index (category as partition key)
-```
-
-#### **Table 3: vyaparai-store-inventory-prod**
-**Purpose**: Store-specific inventory
-
-```javascript
-Primary Key:
-  Partition Key: store_id (String)
-  Sort Key: product_id (String)
-
-Attributes:
-{
-  store_id: string,
-  product_id: string,            // Links to global product
-
-  // Pricing
-  cost_price: decimal,           // Purchase price
-  selling_price: decimal,        // Sale price
-  mrp: decimal,                  // Maximum Retail Price
-  discount_percentage: decimal,
-
-  // Stock
-  current_stock: number,
-  min_stock_level: number,       // Reorder point
-  max_stock_level: number,
-  reorder_quantity: number,
-
-  // Location
-  location: string,              // Shelf/bin location
-  warehouse: string,
-
-  // Supplier
-  supplier: string,
-  supplier_sku: string,
-  last_purchase_date: string,
-  last_purchase_price: decimal,
-
-  // Metadata
-  notes: string,                 // Store-specific notes
-  is_active: boolean,
-  created_at: string,
-  updated_at: string,
-  last_sold_at: string,
-
-  // Analytics
-  total_sold: number,
-  total_revenue: decimal,
-  average_sale_price: decimal
-}
-
-Indexes:
-- GSI: store-active-index (store_id + is_active)
-- GSI: low-stock-index (store_id + current_stock < min_stock_level)
-```
-
-#### **Table 4: vyaparai-orders-prod**
-**Purpose**: Customer orders
-
-```javascript
-Primary Key: order_id (String)
-
-Attributes:
-{
-  order_id: string,              // ORD{timestamp}
-  store_id: string,              // GSI
-
-  // Customer
-  customer_name: string,
-  customer_phone: string,
-  customer_email: string,
-  delivery_address: object,
-
-  // Order Details
-  items: [
-    {
-      product_id: string,
-      product_name: string,
-      quantity: number,
-      unit_price: decimal,
-      discount: decimal,
-      total: decimal
-    }
-  ],
-
-  // Totals
-  subtotal: decimal,
-  tax_amount: decimal,
-  discount_amount: decimal,
-  delivery_charges: decimal,
-  total_amount: decimal,
-
-  // Status
-  status: string,                // pending, confirmed, packed, shipped, delivered, cancelled
-  payment_status: string,        // pending, paid, refunded
-  payment_method: string,        // cash, upi, card
-
-  // Timestamps
-  created_at: string,
-  confirmed_at: string,
-  shipped_at: string,
-  delivered_at: string,
-
-  // Tracking
-  tracking_number: string,
-  notes: string
-}
-
-Indexes:
-- GSI: store-orders-index (store_id + created_at)
-- GSI: status-index (status + created_at)
-```
-
-#### **Table 5: vyaparai-users-prod**
-**Purpose**: User accounts
-
-```javascript
-Primary Key: user_id (String)
-
-Attributes:
-{
-  user_id: string,
-  email: string,                 // GSI
-  full_name: string,
-  phone: string,
-
-  role: string,                  // admin, store_owner, staff
-  store_id: string,              // Linked store
-
-  status: string,                // active, inactive, suspended
-
-  created_at: string,
-  updated_at: string,
-  last_login_at: string,
-
-  preferences: {
-    language: string,
-    notifications: boolean,
-    email_alerts: boolean
-  }
-}
-
-Indexes:
-- GSI: email-index (email as partition key)
-- GSI: store-users-index (store_id + role)
-```
-
-#### **Table 6: vyaparai-sessions-prod**
-**Purpose**: User sessions and passwords
-
-```javascript
-Primary Key:
-  Partition Key: email (String)
-  Sort Key: session_id (String)
-
-Attributes:
-{
-  email: string,
-  session_id: string,
-  password_hash: string,         // bcrypt hash
-  password_salt: string,
-
-  last_login: string,
-  login_count: number,
-  failed_attempts: number,
-  locked_until: string,
-
   created_at: string,
   updated_at: string
 }
 ```
 
-#### **Table 7: vyaparai-passcodes-prod**
-**Purpose**: OTP/Passcode verification
-
+#### **vyaparai-orders-prod**
 ```javascript
-Primary Key: email (String)
-
-Attributes:
 {
-  email: string,
-  passcode: string,              // 6-digit OTP
-  expires_at: string,
-  attempts: number,
-  verified: boolean,
-  created_at: string
-}
+  order_id: string,              // Primary Key (ORD{timestamp})
+  store_id: string,              // GSI
+  customer_id: string,           // GSI
+  order_number: string,          // Human-readable
+  tracking_id: string,           // TRK-{uuid}
 
-TTL: expires_at (auto-delete after expiry)
+  // Customer Info
+  customer_name: string,
+  customer_phone: string,
+  customer_email: string,
+  delivery_address: object,
+
+  // Order Items
+  items: [{
+    product_id: string,
+    product_name: string,
+    quantity: number,
+    unit_price: decimal,
+    item_total: decimal
+  }],
+
+  // Totals
+  subtotal: decimal,
+  tax_amount: decimal,
+  delivery_fee: decimal,
+  total_amount: decimal,
+
+  // Status
+  status: string,                // pending, confirmed, processing, out_for_delivery, delivered, cancelled
+  payment_status: string,        // pending, completed, failed, refunded
+  payment_method: string,        // upi, card, cod, wallet
+  payment_id: string,
+
+  // Timestamps
+  created_at: string,
+  updated_at: string,
+
+  // Metadata
+  channel: string,               // web, whatsapp, phone
+  language: string,
+  notes: string
+}
 ```
 
-#### **Table 8: vyaparai-categories-prod**
-**Purpose**: Product categories
-
+#### **vyaparai-store-inventory-prod**
 ```javascript
-Primary Key: category_id (String)
-
-Attributes:
 {
-  category_id: string,
-  name: string,
-  parent_category_id: string,    // For subcategories
-  display_order: number,
-  icon: string,
+  store_id: string,              // Partition Key
+  product_id: string,            // Sort Key
+
+  // Pricing
+  cost_price: decimal,
+  selling_price: decimal,
+  mrp: decimal,
+  discount_percentage: decimal,
+
+  // Stock
+  current_stock: number,
+  min_stock_level: number,
+  max_stock_level: number,
+
+  // Product Info (denormalized)
+  product_name: string,
+  brand: string,
+  category: string,
+  barcode: string,
+  image_url: string,
+
+  // Metadata
   is_active: boolean,
-
-  regional_names: {
-    "hi": "हिन्दी नाम",
-    "ta": "தமிழ் பெயர்",
-    // ... other languages
-  }
+  created_at: string,
+  updated_at: string,
+  last_sold_at: string
 }
 ```
 
-#### **Table 9: vyaparai-bulk-upload-jobs-prod**
-**Purpose**: Async CSV upload jobs
-
+#### **vyaparai-customer-profiles-prod**
 ```javascript
-Primary Key: job_id (String)
-
-Attributes:
 {
-  job_id: string,
-  store_id: string,
-  user_id: string,
+  customer_id: string,           // Primary Key (CUST{timestamp})
+  email: string,                 // GSI
+  phone: string,                 // GSI (required for OTP)
 
-  file_name: string,
-  file_size: number,
-  s3_key: string,
+  // Personal Info
+  first_name: string,
+  last_name: string,
+  date_of_birth: string,
+  gender: string,
 
-  status: string,                // pending, processing, completed, failed
-  progress: {
-    total_rows: number,
-    processed_rows: number,
-    successful: number,
-    failed: number,
-    percentage: number
+  // Addresses
+  addresses: [{
+    address_id: string,
+    type: string,                // home, work, other
+    is_default: boolean,
+    recipient_name: string,
+    phone: string,
+    street: string,
+    landmark: string,
+    city: string,
+    state: string,
+    pincode: string,
+    coordinates: { latitude, longitude }
+  }],
+
+  // Payment Methods
+  payment_methods: [{
+    payment_id: string,
+    type: string,                // upi, card, wallet, cod
+    is_default: boolean,
+    // Type-specific fields
+  }],
+
+  // Preferences
+  preferences: {
+    language: string,
+    notifications: { email, sms, push, whatsapp }
   },
 
-  errors: [
-    {
-      row: number,
-      error: string,
-      data: object
-    }
-  ],
+  // Stats
+  total_orders: number,
+  total_spent: decimal,
+  favorite_stores: [string],
 
-  started_at: string,
-  completed_at: string,
-  created_at: string
+  // Status
+  status: string,
+  email_verified: boolean,
+  phone_verified: boolean,
+  created_at: string,
+  updated_at: string
 }
-
-Indexes:
-- GSI: store-jobs-index (store_id + created_at)
 ```
 
-### 5.2 Data Access Patterns
+### 5.3 Data Access Patterns
 
-#### **Pattern 1: Get Store Inventory**
-```
-Query: store-id + product-id (direct lookup)
-Index: Primary key
-Complexity: O(1)
-```
-
-#### **Pattern 2: List Low Stock Items**
-```
-Query: store-id + current_stock < min_stock_level
-Index: low-stock-index (GSI)
-Complexity: O(n) where n = matching items
-```
-
-#### **Pattern 3: Find Product by Barcode**
-```
-Query: barcode
-Index: barcode-index (GSI)
-Complexity: O(1)
-```
-
-#### **Pattern 4: Search Products by Name**
-```
-Method: Scan with filter (expensive)
-Alternative: Use OpenSearch/Elasticsearch
-Optimization: Implement text search service
-```
-
-#### **Pattern 5: Get Store Orders**
-```
-Query: store-id + date range
-Index: store-orders-index (GSI)
-Complexity: O(n) where n = orders in range
-```
-
-### 5.3 Data Consistency
-
-#### **Consistency Model**
-- **Strong Consistency**: Financial transactions, inventory updates
-- **Eventual Consistency**: Analytics, reporting, search indexes
-
-#### **Conflict Resolution**
-- **Last Write Wins**: Default for most updates
-- **Conditional Updates**: For critical operations (stock updates)
-- **Optimistic Locking**: Version numbers for concurrent updates
-
-### 5.4 Backup & Recovery
-
-#### **Backup Strategy**
-- **DynamoDB Point-in-Time Recovery**: Enabled on all tables
-- **Retention**: 35 days
-- **S3 Versioning**: Enabled for image storage
-- **Cross-Region Replication**: Planned for disaster recovery
+| Pattern | Query | Index | Complexity |
+|---------|-------|-------|------------|
+| Get store by ID | store_id | Primary | O(1) |
+| Get store by email | email | GSI | O(1) |
+| Get inventory by store | store_id | Primary | O(n) |
+| Get product by barcode | barcode | GSI | O(1) |
+| Get orders by store | store_id + date | GSI | O(n) |
+| Get customer orders | customer_id | GSI | O(n) |
+| Get low stock items | store_id + stock < min | Scan + Filter | O(n) |
 
 ---
 
-## 6. API Specification
+## 6. Backend Architecture
 
-### 6.1 API Overview
+### 6.1 Application Structure
 
-**Base URL**: `https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com`
-**Protocol**: HTTPS only
-**Format**: JSON
-**Authentication**: JWT Bearer tokens
-**Versioning**: URI versioning (`/api/v1/`)
+```
+backend/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI app initialization
+│   ├── api/
+│   │   └── v1/                    # API version 1
+│   │       ├── __init__.py
+│   │       ├── admin_auth.py      # Admin authentication
+│   │       ├── admin_products.py  # Admin product management
+│   │       ├── analytics.py       # Analytics endpoints
+│   │       ├── auth.py            # Store owner authentication
+│   │       ├── cart.py            # Shopping cart API
+│   │       ├── customer_auth.py   # Customer authentication
+│   │       ├── customer_orders.py # Customer order endpoints
+│   │       ├── customers.py       # Customer management
+│   │       ├── health.py          # Health check endpoints
+│   │       ├── inventory.py       # Inventory management
+│   │       ├── notifications.py   # Notification API
+│   │       ├── orders.py          # Order management
+│   │       ├── payments.py        # Payment processing
+│   │       ├── public.py          # Public endpoints
+│   │       └── stores.py          # Store management
+│   ├── models/                    # Data models
+│   │   ├── customer.py
+│   │   ├── inventory.py
+│   │   ├── notification.py
+│   │   ├── order.py
+│   │   └── product.py
+│   ├── services/                  # Business logic
+│   │   ├── email_service.py
+│   │   ├── geocoding_service.py
+│   │   ├── inventory_service.py
+│   │   ├── notification_service.py
+│   │   ├── order_transaction_service.py
+│   │   ├── payment_service.py
+│   │   ├── product_media_service.py
+│   │   ├── store_search_service.py
+│   │   └── unified_order_service.py
+│   ├── core/                      # Core utilities
+│   │   ├── audit.py
+│   │   ├── cache.py
+│   │   ├── config.py
+│   │   ├── exceptions.py
+│   │   ├── logging_config.py
+│   │   ├── monitoring.py
+│   │   ├── password.py
+│   │   ├── retry.py
+│   │   ├── security.py
+│   │   └── validation.py
+│   ├── database/                  # Database layer
+│   │   ├── hybrid_db.py           # PostgreSQL + DynamoDB
+│   │   └── migrations/
+│   ├── middleware/                # FastAPI middleware
+│   │   └── rate_limit.py
+│   └── security/
+│       └── data_privacy.py
+├── lambda_handler.py              # Lambda entry point
+├── requirements.txt
+└── .env.production
+```
 
-### 6.2 Authentication Endpoints
+### 6.2 Services Layer
 
-#### **POST /api/v1/auth/send-email-passcode**
-Send OTP to email for authentication
+#### **InventoryService** (`inventory_service.py`)
+Handles all inventory operations with DynamoDB.
 
-**Request:**
-```json
-{
-  "email": "shop@example.com"
+**Key Methods:**
+```python
+get_products(store_id, page, limit, category, status)
+get_product(store_id, product_id)
+search_products(store_id, query)
+update_stock(store_id, product_id, quantity)          # Atomic with conditional expression
+update_stock_bulk_transactional(store_id, items)      # DynamoDB TransactWriteItems
+check_availability(store_id, items)
+get_low_stock_products(store_id, threshold)
+get_inventory_summary(store_id)
+```
+
+**Key Features:**
+- Atomic stock updates using conditional expressions
+- Transaction support (max 100 items per transaction)
+- Exponential backoff for throughput exceeded errors
+- Prevents overselling with conditional checks
+
+#### **OrderTransactionService** (`order_transaction_service.py`)
+Implements Saga pattern for transactional order creation.
+
+**Key Methods:**
+```python
+create_order_with_stock_reservation(store_id, items, order_data)
+_reserve_stock(store_id, items, order_id)
+_rollback_stock_reservation(store_id, items, order_id)
+```
+
+**Saga Flow:**
+```
+1. Reserve stock (atomic deduction) → TransactWriteItems
+2. Create order in DynamoDB
+3. On failure: Execute compensating transaction (restore stock)
+```
+
+#### **PaymentService** (`payment_service.py`)
+Razorpay integration for payment processing.
+
+**Key Methods:**
+```python
+create_payment(order_id, amount, currency)
+verify_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature)
+process_refund(payment_id, amount)
+get_payment_status(payment_id)
+```
+
+**Supported Methods:** UPI, Card, Wallet, COD
+
+#### **GeocodingService** (`geocoding_service.py`)
+Google Maps API integration for store discovery.
+
+**Key Methods:**
+```python
+geocode_address(street, city, state, pincode)
+geocode_search_query(pincode, landmark, city, state)
+```
+
+**Features:**
+- In-memory caching (reduces API costs)
+- India-biased results
+- Auto-geocoding at store registration
+
+### 6.3 Middleware
+
+#### **Rate Limiting** (`rate_limit.py`)
+Distributed rate limiting using Redis.
+
+**Rate Limits:**
+| Endpoint Type | Limit |
+|--------------|-------|
+| General API | 100 req/min per phone |
+| Store API | 1000 req/min per store |
+| OTP Send | 5/min |
+| OTP Verify | 10/min |
+| Login | 10/min |
+| Register | 5/min |
+| IP-based | 200 req/min |
+
+### 6.4 Security
+
+**Security Headers (OWASP Compliant):**
+- X-Content-Type-Options: nosniff
+- X-Frame-Options: DENY
+- X-XSS-Protection: 1; mode=block
+- Referrer-Policy: strict-origin-when-cross-origin
+- Content-Security-Policy: Custom per request
+- HSTS: Enabled in production
+
+**Custom Middlewares:**
+- `SecurityHeadersMiddleware`: OWASP security headers
+- `RequestSizeLimitMiddleware`: 10MB max payload
+- `ContentTypeValidationMiddleware`: Validate POST/PUT content
+- `APIRequestAuditMiddleware`: Log all API requests
+- `RequestTimeoutMiddleware`: 30s timeout
+
+---
+
+## 7. Frontend Architecture
+
+### 7.1 Application Structure
+
+```
+frontend-pwa/
+├── src/
+│   ├── pages/                     # 70+ page components
+│   │   ├── admin/                 # Admin pages
+│   │   │   ├── AdminDashboard.tsx
+│   │   │   ├── AdminLogin.tsx
+│   │   │   └── AdminProductCatalog.tsx
+│   │   ├── customer/              # Customer pages
+│   │   │   ├── CartPage.tsx
+│   │   │   ├── CheckoutPage.tsx
+│   │   │   ├── CustomerOrders.tsx
+│   │   │   ├── CustomerProductCatalog.tsx
+│   │   │   ├── EnhancedStoreHomePage.tsx
+│   │   │   ├── OrderConfirmation.tsx
+│   │   │   ├── OrderDetails.tsx
+│   │   │   ├── OrderTracking.tsx
+│   │   │   └── StoreSelector.tsx
+│   │   ├── marketing/
+│   │   │   └── HomePage.tsx
+│   │   ├── Dashboard.tsx
+│   │   ├── Analytics.tsx
+│   │   ├── InventoryManagement.tsx
+│   │   ├── EnhancedInventoryManagement.tsx
+│   │   ├── MobileBarcodeScanner.tsx
+│   │   ├── Orders.tsx
+│   │   ├── StoreOwnerDashboard.tsx
+│   │   └── StoreOwnerDashboardEnhanced.tsx
+│   ├── components/                # 40+ component categories
+│   │   ├── Admin/
+│   │   ├── Analytics/
+│   │   ├── Auth/
+│   │   ├── Cart/
+│   │   ├── Checkout/
+│   │   ├── common/
+│   │   ├── Dashboard/
+│   │   ├── Inventory/
+│   │   ├── Layout/
+│   │   ├── Orders/
+│   │   ├── Payment/
+│   │   └── customer/
+│   ├── services/                  # 28 API services
+│   │   ├── api.ts
+│   │   ├── apiClient.ts
+│   │   ├── authService.ts
+│   │   ├── cartService.ts
+│   │   ├── customerService.ts
+│   │   ├── enterpriseWebSocket.ts
+│   │   ├── inventoryService.ts
+│   │   ├── orderService.ts
+│   │   ├── paymentService.ts
+│   │   ├── razorpayService.ts
+│   │   ├── realtimeOrderService.ts
+│   │   └── storeService.ts
+│   ├── stores/                    # Zustand stores
+│   │   ├── authStore.ts
+│   │   ├── cartStore.ts
+│   │   └── unifiedAuthStore.ts
+│   ├── hooks/                     # 13 custom hooks
+│   │   ├── useRealtimeOrder.ts
+│   │   ├── useWebSocket.ts
+│   │   ├── useRazorpayPayment.ts
+│   │   └── useGeolocation.ts
+│   ├── i18n/                      # 10+ languages
+│   ├── sw.ts                      # Service Worker
+│   ├── App.tsx
+│   └── main.tsx
+├── public/
+│   └── manifest.json              # PWA manifest
+├── vite.config.ts
+└── package.json
+```
+
+### 7.2 State Management
+
+**Zustand Stores:**
+
+#### **authStore.ts**
+```typescript
+interface AuthState {
+  user: User | null;
+  isAuthenticated: boolean;
+  signIn: (email, password) => Promise<void>;
+  signUp: (data) => Promise<void>;
+  verifyOTP: (email, otp) => Promise<void>;
+  signOut: () => void;
 }
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Passcode sent to email",
-  "expires_in": 300
+#### **cartStore.ts**
+```typescript
+interface CartState {
+  items: CartItem[];
+  storeId: string | null;
+  customerInfo: CustomerInfo;
+  addItem: (item) => void;
+  updateQuantity: (productId, quantity) => void;
+  removeItem: (productId) => void;
+  clearCart: () => void;
+  syncWithBackend: () => Promise<void>;
+}
+// Persists to localStorage
+// Backend sync with guest cart migration
+```
+
+### 7.3 Routing Structure
+
+```typescript
+// Authentication Routes
+/signin                           // Role selection
+/login                            // Main login
+/signup                           // Registration
+/email-login                      // Email auth
+/email-verification               // Verification
+
+// Admin Routes (Protected)
+/nimdaaccess                      // Admin login (hidden)
+/admin                            // Admin dashboard
+/admin/products                   // Product catalog admin
+
+// Customer Routes
+/products                         // Product catalog
+/customer/auth                    // Customer login
+/customer/stores                  // Store selector
+/customer/store/:storeId          // Store detail
+/customer/products                // Products for store
+/customer/cart                    // Shopping cart
+/customer/checkout                // Checkout flow
+/customer/orders                  // Order history
+/customer/orders/:orderId         // Order details
+/customer/orders/:orderId/tracking // Live tracking
+
+// Store Owner Routes
+/store-login                      // Store owner login
+/store-dashboard                  // Basic dashboard
+/store-dashboard-enhanced         // Enhanced dashboard
+/inventory                        // Inventory management
+/inventory-enhanced               // Advanced inventory
+/mobile-scan                      // Barcode scanner
+
+// Marketing Routes
+/                                 // Home page
+/nearby-stores                    // Store locator
+/store/:storeId                   // Store detail (public)
+```
+
+### 7.4 PWA Features
+
+**Service Worker Caching Strategies:**
+| Resource | Strategy | TTL |
+|----------|----------|-----|
+| Static assets | CacheFirst | 30 days |
+| API responses | NetworkFirst | 5 minutes |
+| Images | CacheFirst | 30 days |
+| Fonts | CacheFirst | 1 year |
+| Orders API | StaleWhileRevalidate | - |
+
+**Offline Capabilities:**
+- Cached app shell for offline access
+- Queued API calls with BackgroundSync
+- Offline indicator UI
+- Graceful degradation
+
+**PWA Manifest Features:**
+- Standalone display mode
+- App shortcuts (Orders, Dashboard, Inventory)
+- File handlers (Images, CSV, XLSX)
+- Share target capability
+- Protocol handlers (web+vyaparai://)
+
+### 7.5 Custom Hooks
+
+#### **useEnterpriseWebSocket**
+```typescript
+function useEnterpriseWebSocket(storeId: string) {
+  // Returns
+  return {
+    status: ConnectionStatus,      // 'connecting' | 'connected' | 'disconnected' | 'error'
+    isConnected: boolean,
+    newOrders: OrderNotification[],
+    clearNewOrders: () => void,
+    reconnect: () => void,
+    disconnect: () => void
+  };
 }
 ```
 
-#### **POST /api/v1/auth/verify-email-passcode**
-Verify OTP and get JWT token
-
-**Request:**
-```json
-{
-  "email": "shop@example.com",
-  "passcode": "123456"
+#### **useRazorpayPayment**
+```typescript
+function useRazorpayPayment() {
+  return {
+    initiatePayment: (order, options) => Promise<PaymentResult>,
+    isLoading: boolean,
+    error: string | null
+  };
 }
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "token": "eyJhbGciOiJIUzI1NiIs...",
-  "user": {
-    "user_id": "usr_123",
-    "email": "shop@example.com",
-    "store_id": "str_456"
-  },
-  "has_password": false
+#### **useRealtimeOrder**
+```typescript
+function useRealtimeOrder(orderId: string) {
+  return {
+    order: Order,
+    status: OrderStatus,
+    isTracking: boolean,
+    estimatedTime: string
+  };
 }
 ```
 
-#### **POST /api/v1/auth/setup-password**
-Set up password after first login
+---
 
-**Headers:** `Authorization: Bearer {token}`
+## 8. API Specification
 
-**Request:**
-```json
-{
-  "password": "SecurePass123!"
-}
+### 8.1 API Overview
+
+| Attribute | Value |
+|-----------|-------|
+| Base URL | `https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com` |
+| Protocol | HTTPS only |
+| Format | JSON |
+| Authentication | JWT Bearer tokens |
+| Versioning | URI versioning (`/api/v1/`) |
+
+### 8.2 Authentication Endpoints
+
+#### **Store Owner Authentication**
+```
+POST /api/v1/auth/send-otp              # Send OTP
+POST /api/v1/auth/verify-otp            # Verify OTP, get token
+POST /api/v1/auth/login                 # Login with phone/password
+POST /api/v1/auth/send-email-passcode   # Email-based OTP
+POST /api/v1/auth/verify-email-passcode # Verify email OTP
+POST /api/v1/auth/setup-password        # Set up password
+POST /api/v1/auth/login-with-password   # Email + password login
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Password setup successful"
-}
+#### **Customer Authentication**
+```
+POST /api/v1/customer/auth/send-otp     # Send OTP to customer
+POST /api/v1/customer/auth/verify-otp   # Verify customer OTP
+POST /api/v1/customer/auth/register     # Register new customer
+POST /api/v1/customer/auth/login        # Customer login
+GET  /api/v1/customer/auth/profile      # Get profile
+PUT  /api/v1/customer/auth/profile      # Update profile
 ```
 
-#### **POST /api/v1/auth/login-with-password**
-Login with email and password
-
-**Request:**
-```json
-{
-  "email": "shop@example.com",
-  "password": "SecurePass123!"
-}
+#### **Admin Authentication**
+```
+POST /api/v1/admin/auth/login           # Admin login
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "token": "eyJhbGciOiJIUzI1NiIs...",
-  "user": {
-    "user_id": "usr_123",
-    "email": "shop@example.com",
-    "store_id": "str_456",
-    "role": "store_owner"
-  }
-}
+### 8.3 Inventory Endpoints
+
+```
+GET    /api/v1/inventory/products                 # List products (paginated)
+GET    /api/v1/inventory/products/{product_id}    # Get single product
+POST   /api/v1/inventory/products                 # Add product
+PUT    /api/v1/inventory/products/{product_id}    # Update product
+DELETE /api/v1/inventory/products/{product_id}    # Delete product
+POST   /api/v1/inventory/search                   # Search products
+GET    /api/v1/inventory/stock/{product_id}       # Check stock
+POST   /api/v1/inventory/stock/update             # Update stock (atomic)
+POST   /api/v1/inventory/stock/bulk-update        # Bulk update (transactional)
+GET    /api/v1/inventory/low-stock                # Low stock products
+GET    /api/v1/inventory/summary                  # Inventory stats
 ```
 
-### 6.3 Inventory Management Endpoints
+### 8.4 Order Endpoints
 
-#### **GET /api/v1/inventory/products**
-List all products in store inventory
-
-**Headers:** `Authorization: Bearer {token}`
-
-**Query Parameters:**
-- `page` (optional): Page number (default: 1)
-- `limit` (optional): Items per page (default: 50)
-- `status` (optional): active, inactive, low_stock
-- `category` (optional): Filter by category
-
-**Response:**
-```json
-{
-  "success": true,
-  "products": [
-    {
-      "id": "GP1759847856118",
-      "product_id": "GP1759847856118",
-      "store_id": "str_456",
-      "name": "Tata Salt",
-      "brand": "Tata",
-      "category": "Groceries",
-      "price": 20.00,
-      "selling_price": 20.00,
-      "cost_price": 18.00,
-      "mrp": 22.00,
-      "stock_quantity": 50,
-      "current_stock": 50,
-      "min_stock_level": 10,
-      "max_stock_level": 100,
-      "is_active": true,
-      "barcode": "8901234567890",
-      "created_at": "2025-10-01T10:30:00Z",
-      "updated_at": "2025-10-05T15:45:00Z"
-    }
-  ],
-  "total": 150,
-  "page": 1,
-  "limit": 50,
-  "pages": 3
-}
+#### **Store Owner Orders**
+```
+GET  /api/v1/orders                       # List orders
+GET  /api/v1/orders/{order_id}            # Get order details
+GET  /api/v1/orders/{order_id}/status     # Get status
+POST /api/v1/orders                       # Create order
+POST /api/v1/orders/{order_id}/cancel     # Cancel order
+PUT  /api/v1/orders/{order_id}/status     # Update status
+GET  /api/v1/orders/history               # Order history (paginated)
+GET  /api/v1/orders/export                # Export CSV/PDF
+GET  /api/v1/orders/stats/daily           # Daily statistics
+POST /api/v1/orders/calculate-total       # Calculate total
 ```
 
-#### **POST /api/v1/inventory/products**
-Add new product to inventory
-
-**Headers:** `Authorization: Bearer {token}`
-
-**Request:**
-```json
-{
-  "product_name": "Maggi Noodles",
-  "brand_name": "Nestle",
-  "barcode": "8901058843095",
-  "category": "Instant Food",
-  "selling_price": 14.00,
-  "cost_price": 12.00,
-  "mrp": 15.00,
-  "current_stock": 100,
-  "min_stock_level": 20,
-  "max_stock_level": 200,
-  "attributes": {
-    "weight": "70g",
-    "pack_size": "1",
-    "unit": "piece"
-  }
-}
+#### **Customer Orders**
+```
+GET  /api/v1/customer/orders              # Customer's orders
+POST /api/v1/customers/orders             # Create order (Saga)
+GET  /api/v1/customer/orders/{id}         # Order details
+POST /api/v1/customer/orders/{id}/track   # Track order
+POST /api/v1/customer/orders/{id}/cancel  # Cancel order
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Product added successfully",
-  "product": {
-    "product_id": "GP1728394857123",
-    "store_id": "str_456",
-    "name": "Maggi Noodles",
-    "matched_from_catalog": true,
-    "global_product_id": "GP1659847123456"
-  }
-}
+### 8.5 Payment Endpoints
+
+```
+POST /api/v1/payments/create              # Create payment intent
+POST /api/v1/payments/confirm             # Confirm payment
+GET  /api/v1/payments/{payment_id}/status # Get payment status
+POST /api/v1/payments/{payment_id}/refund # Refund payment
+POST /api/v1/payments/cod                 # Cash on Delivery
+GET  /api/v1/payments/methods             # Available methods
+POST /api/v1/payments/calculate-total     # Calculate order total
 ```
 
-#### **PUT /api/v1/inventory/products/{product_id}**
-Update product details
+### 8.6 Store Endpoints
 
-**Headers:** `Authorization: Bearer {token}`
-
-**Request:**
-```json
-{
-  "selling_price": 15.00,
-  "current_stock": 75,
-  "min_stock_level": 15
-}
+```
+GET    /api/v1/stores                     # List stores
+GET    /api/v1/stores/{store_id}          # Get store details
+POST   /api/v1/stores                     # Create store
+PUT    /api/v1/stores/{store_id}          # Update store
+DELETE /api/v1/stores/{store_id}          # Delete store
+GET    /api/v1/stores/{store_id}/orders   # Store orders
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Product updated successfully",
-  "product": {
-    "product_id": "GP1728394857123",
-    "updated_fields": ["selling_price", "current_stock", "min_stock_level"],
-    "updated_at": "2025-10-08T12:30:00Z"
-  }
-}
+### 8.7 Public Endpoints
+
+```
+GET /api/v1/public/stores                 # List active stores
+GET /api/v1/public/stores/nearby          # Nearby stores (GPS)
+GET /api/v1/public/stores/{id}/products   # Store products
+GET /api/v1/public/categories             # Product categories
 ```
 
-#### **DELETE /api/v1/inventory/products/{product_id}**
-Delete product from inventory
+### 8.8 Webhook Endpoints
 
-**Headers:** `Authorization: Bearer {token}`
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Product deleted successfully"
-}
+```
+POST /api/v1/orders/webhooks/whatsapp     # WhatsApp Cloud API
+POST /api/v1/orders/webhooks/rcs          # Google RCS
+POST /api/v1/orders/webhooks/sms          # SMS gateway
+POST /api/v1/payments/webhooks/razorpay   # Payment notifications
 ```
 
-### 6.4 Order Management Endpoints
+### 8.9 Error Response Format
 
-#### **GET /api/v1/orders**
-List orders
-
-**Headers:** `Authorization: Bearer {token}`
-
-**Query Parameters:**
-- `status` (optional): pending, confirmed, delivered, cancelled
-- `from_date` (optional): ISO date
-- `to_date` (optional): ISO date
-
-**Response:**
-```json
-{
-  "success": true,
-  "orders": [
-    {
-      "order_id": "ORD1728394857123",
-      "store_id": "str_456",
-      "customer_name": "Rajesh Kumar",
-      "customer_phone": "+919876543210",
-      "items": [
-        {
-          "product_id": "GP1728394857123",
-          "product_name": "Maggi Noodles",
-          "quantity": 5,
-          "unit_price": 14.00,
-          "total": 70.00
-        }
-      ],
-      "subtotal": 70.00,
-      "tax_amount": 3.50,
-      "total_amount": 73.50,
-      "status": "pending",
-      "payment_status": "pending",
-      "created_at": "2025-10-08T10:00:00Z"
-    }
-  ],
-  "total": 25
-}
-```
-
-#### **POST /api/v1/orders**
-Create new order
-
-**Headers:** `Authorization: Bearer {token}`
-
-**Request:**
-```json
-{
-  "customer_name": "Rajesh Kumar",
-  "customer_phone": "+919876543210",
-  "items": [
-    {
-      "product_id": "GP1728394857123",
-      "quantity": 5
-    }
-  ],
-  "payment_method": "cash",
-  "notes": "Deliver before 6 PM"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "order": {
-    "order_id": "ORD1728394857123",
-    "total_amount": 73.50,
-    "status": "pending",
-    "created_at": "2025-10-08T10:00:00Z"
-  }
-}
-```
-
-### 6.5 Admin Endpoints
-
-#### **GET /api/v1/admin/products/global**
-List all global products (admin only)
-
-**Headers:** `Authorization: Bearer {admin_token}`
-
-**Response:**
-```json
-{
-  "success": true,
-  "products": [
-    {
-      "product_id": "GP1659847123456",
-      "name": "Maggi Noodles",
-      "brand": "Nestle",
-      "category": "Instant Food",
-      "barcode": "8901058843095",
-      "verification_status": "verified",
-      "quality_score": 95,
-      "stores_using_count": 1250,
-      "created_at": "2024-08-01T10:00:00Z"
-    }
-  ],
-  "total": 16
-}
-```
-
-#### **DELETE /api/v1/admin/products/{product_id}**
-Delete global product (admin only)
-
-**Headers:** `Authorization: Bearer {admin_token}`
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Global product deleted successfully",
-  "product_id": "GP1659847123456"
-}
-```
-
-### 6.6 Error Responses
-
-#### **Standard Error Format**
 ```json
 {
   "success": false,
@@ -1107,281 +1080,42 @@ Delete global product (admin only)
 }
 ```
 
-#### **HTTP Status Codes**
-- `200 OK` - Success
-- `201 Created` - Resource created
-- `400 Bad Request` - Invalid input
-- `401 Unauthorized` - Missing or invalid token
-- `403 Forbidden` - Insufficient permissions
-- `404 Not Found` - Resource not found
-- `409 Conflict` - Resource conflict (duplicate)
-- `429 Too Many Requests` - Rate limit exceeded
-- `500 Internal Server Error` - Server error
-
-### 6.7 Rate Limiting
-
-**Limits:**
-- Anonymous: 100 requests/hour
-- Authenticated: 1000 requests/hour
-- Admin: 5000 requests/hour
-
-**Headers:**
-```
-X-RateLimit-Limit: 1000
-X-RateLimit-Remaining: 950
-X-RateLimit-Reset: 1728394857
-```
+**HTTP Status Codes:**
+| Code | Meaning |
+|------|---------|
+| 200 | Success |
+| 201 | Created |
+| 400 | Bad Request |
+| 401 | Unauthorized |
+| 403 | Forbidden |
+| 404 | Not Found |
+| 409 | Conflict |
+| 429 | Rate Limit |
+| 500 | Server Error |
 
 ---
 
-## 7. Frontend Architecture
+## 9. Security & Authentication
 
-### 7.1 Application Structure
+### 9.1 Authentication Flows
 
+#### **Phone OTP Flow (Store Owners)**
 ```
-frontend-pwa/
-├── public/                      # Static assets
-│   ├── manifest.json           # PWA manifest
-│   └── icons/                  # App icons
-├── src/
-│   ├── main.tsx               # Entry point
-│   ├── App.tsx                # Root component
-│   ├── router.tsx             # Route configuration
-│   │
-│   ├── pages/                 # 47 page components
-│   │   ├── auth/
-│   │   │   ├── Login.tsx
-│   │   │   ├── Signup.tsx
-│   │   │   └── PasswordSetup.tsx
-│   │   ├── dashboard/
-│   │   │   ├── Dashboard.tsx
-│   │   │   └── Analytics.tsx
-│   │   ├── inventory/
-│   │   │   ├── InventoryManagement.tsx
-│   │   │   └── ProductCatalog.tsx
-│   │   ├── orders/
-│   │   │   ├── Orders.tsx
-│   │   │   └── OrderHistory.tsx
-│   │   └── admin/
-│   │       ├── AdminDashboard.tsx
-│   │       └── AdminProductCatalog.tsx
-│   │
-│   ├── components/            # 31 reusable components
-│   │   ├── common/
-│   │   │   ├── Header.tsx
-│   │   │   ├── Sidebar.tsx
-│   │   │   └── LoadingSpinner.tsx
-│   │   ├── inventory/
-│   │   │   ├── ProductCard.tsx
-│   │   │   ├── ProductEntryForm.tsx
-│   │   │   └── BarcodeScanner.tsx
-│   │   └── orders/
-│   │       ├── OrderCard.tsx
-│   │       └── OrderStatusBadge.tsx
-│   │
-│   ├── services/              # 17 API services
-│   │   ├── api.ts            # Base API client
-│   │   ├── authService.ts
-│   │   ├── inventoryService.ts
-│   │   ├── orderService.ts
-│   │   └── geminiService.ts
-│   │
-│   ├── stores/               # State management
-│   │   ├── useAuthStore.ts
-│   │   ├── useInventoryStore.ts
-│   │   └── useCartStore.ts
-│   │
-│   ├── hooks/                # Custom hooks
-│   │   ├── useAuth.ts
-│   │   ├── useDebounce.ts
-│   │   └── useMediaQuery.ts
-│   │
-│   ├── utils/                # Utilities
-│   │   ├── formatters.ts
-│   │   ├── validators.ts
-│   │   └── constants.ts
-│   │
-│   ├── types/                # TypeScript types
-│   │   ├── product.ts
-│   │   ├── order.ts
-│   │   └── user.ts
-│   │
-│   ├── i18n/                 # Internationalization
-│   │   ├── config.ts
-│   │   └── translations/
-│   │       ├── en.json
-│   │       ├── hi.json
-│   │       └── ta.json
-│   │
-│   └── styles/               # Global styles
-│       ├── theme.ts          # MUI theme
-│       └── global.css
+Enter Phone → Send OTP → Verify OTP → JWT Token
+              ↓
+First Time → Setup Password (optional)
+Returning → Can use Password
 ```
 
-### 7.2 State Management Strategy
-
-#### **Global State (Zustand)**
-```typescript
-// useAuthStore.ts
-interface AuthState {
-  user: User | null;
-  token: string | null;
-  isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
-}
-
-export const useAuthStore = create<AuthState>((set) => ({
-  user: null,
-  token: localStorage.getItem('token'),
-  isAuthenticated: !!localStorage.getItem('token'),
-  login: async (email, password) => {
-    const response = await authService.login(email, password);
-    set({
-      user: response.user,
-      token: response.token,
-      isAuthenticated: true
-    });
-  },
-  logout: () => {
-    localStorage.removeItem('token');
-    set({ user: null, token: null, isAuthenticated: false });
-  }
-}));
+#### **Customer Authentication**
+```
+Enter Phone → Send OTP → Verify OTP → JWT Token
+              ↓
+New Customer → Auto-create profile
+Existing → Return profile + cart migration
 ```
 
-#### **Server State (TanStack Query)**
-```typescript
-// useProducts.ts
-export const useProducts = () => {
-  return useQuery({
-    queryKey: ['products'],
-    queryFn: () => inventoryService.getProducts(),
-    staleTime: 5 * 60 * 1000, // 5 minutes
-    cacheTime: 30 * 60 * 1000  // 30 minutes
-  });
-};
-```
-
-### 7.3 Routing Structure
-
-```typescript
-// router.tsx
-const routes = [
-  // Public routes
-  { path: '/', element: <HomePage /> },
-  { path: '/login', element: <Login /> },
-  { path: '/signup', element: <Signup /> },
-
-  // Protected routes (store owner)
-  {
-    path: '/dashboard',
-    element: <ProtectedRoute><Dashboard /></ProtectedRoute>
-  },
-  {
-    path: '/inventory',
-    element: <ProtectedRoute><InventoryManagement /></ProtectedRoute>
-  },
-  {
-    path: '/orders',
-    element: <ProtectedRoute><Orders /></ProtectedRoute>
-  },
-
-  // Admin routes
-  {
-    path: '/admin',
-    element: <AdminRoute><AdminDashboard /></AdminRoute>
-  },
-  {
-    path: '/admin/products',
-    element: <AdminRoute><AdminProductCatalog /></AdminRoute>
-  }
-];
-```
-
-### 7.4 PWA Configuration
-
-#### **Service Worker Strategy**
-```typescript
-// vite.config.ts
-VitePWA({
-  registerType: 'autoUpdate',
-  workbox: {
-    globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
-    runtimeCaching: [
-      {
-        urlPattern: /^https:\/\/api\.vyaparai\.com\/.*/i,
-        handler: 'NetworkFirst',
-        options: {
-          cacheName: 'api-cache',
-          expiration: {
-            maxEntries: 100,
-            maxAgeSeconds: 60 * 60 // 1 hour
-          }
-        }
-      },
-      {
-        urlPattern: /^https:\/\/.*\.(png|jpg|jpeg|svg|gif)$/i,
-        handler: 'CacheFirst',
-        options: {
-          cacheName: 'images-cache',
-          expiration: {
-            maxEntries: 50,
-            maxAgeSeconds: 30 * 24 * 60 * 60 // 30 days
-          }
-        }
-      }
-    ]
-  }
-})
-```
-
-#### **Offline Support**
-- **Cache API requests**: Network-first strategy
-- **Cache images**: Cache-first strategy
-- **Background sync**: Queue failed requests
-- **Offline indicator**: Visual feedback when offline
-
-### 7.5 Responsive Design
-
-#### **Breakpoints**
-```typescript
-// theme.ts
-const breakpoints = {
-  xs: 0,      // Mobile
-  sm: 600,    // Tablet
-  md: 960,    // Small Desktop
-  lg: 1280,   // Desktop
-  xl: 1920    // Large Desktop
-};
-```
-
-#### **Mobile-First Approach**
-- Base styles for mobile
-- Progressive enhancement for larger screens
-- Touch-friendly UI elements
-- Optimized images
-
----
-
-## 8. Security & Authentication
-
-### 8.1 Authentication Flow
-
-#### **Email + OTP Flow**
-```
-User → Enter Email → Send OTP → Verify OTP → JWT Token
-  ↓
-First Time User → Setup Password
-Returning User → Can use Password
-```
-
-#### **Password Flow**
-```
-User → Enter Email + Password → Verify → JWT Token
-```
-
-### 8.2 JWT Token Structure
+### 9.2 JWT Token Structure
 
 ```json
 {
@@ -1396,884 +1130,691 @@ User → Enter Email + Password → Verify → JWT Token
     "role": "store_owner",
     "iat": 1728394857,
     "exp": 1730986857
-  },
-  "signature": "..."
+  }
 }
 ```
 
-**Token Expiry**: 30 days
-**Refresh Strategy**: Re-authentication required after expiry
+**Token Expiration:**
+| Token Type | Expiry |
+|------------|--------|
+| Access Token | 30 minutes |
+| Refresh Token | 7 days |
+| Customer Token | 30 days |
+| Admin Token | 24 hours |
+| Store Owner Token | 7 days |
 
-### 8.3 Authorization
-
-#### **Role-Based Access Control (RBAC)**
+### 9.3 Role-Based Access Control
 
 | Role | Permissions |
 |------|------------|
-| **admin** | Full system access, manage global products, user management |
-| **store_owner** | Manage own store, inventory, orders |
-| **staff** | View inventory, create orders (future) |
-| **customer** | Place orders, track orders (future) |
+| admin | Full system access, global products, user management |
+| store_owner | Own store, inventory, orders, customers |
+| customer | Place orders, track orders, manage profile |
 
-#### **Endpoint Protection**
+### 9.4 Data Security
 
-```python
-# Admin-only endpoint
-@app.get("/api/v1/admin/products")
-async def get_admin_products(request: Request):
-    user = get_user_from_jwt(request)
-    if user.role != 'admin':
-        raise HTTPException(403, "Admin access required")
-    # ... logic
+| Aspect | Implementation |
+|--------|----------------|
+| In Transit | TLS 1.3 (HTTPS) |
+| At Rest | AES-256 (DynamoDB, S3) |
+| Passwords | bcrypt (cost factor: 12) |
+| Tokens | HMAC-SHA256 signed |
+| Multi-tenancy | Store-level data isolation |
+
+### 9.5 Enterprise Token Management (Frontend)
+
+> **Updated: January 2026** - Centralized token management with enterprise-grade features.
+
+#### 9.5.1 Architecture Overview
+
+The frontend implements a centralized `TokenManager` singleton that provides:
+- Single source of truth for all authentication tokens
+- Multi-tab session synchronization
+- Proactive token refresh detection
+- Idle session timeout
+- Legacy token migration
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         TokenManager (Singleton)                             │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐ │
+│  │  Token Storage  │  │  Session Sync   │  │  Idle Timeout               │ │
+│  │  - vyaparai_    │  │  - storage      │  │  - 30 min inactivity        │ │
+│  │    token        │  │    events       │  │  - Activity tracking        │ │
+│  │  - vyaparai_    │  │  - Cross-tab    │  │  - Auto logout              │ │
+│  │    user_type    │  │    logout       │  │                             │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+            ┌───────────┐   ┌───────────┐   ┌───────────┐
+            │ apiClient │   │ unified   │   │  api.ts   │
+            │    .ts    │   │ ApiClient │   │           │
+            └───────────┘   └───────────┘   └───────────┘
+                    │               │               │
+                    └───────────────┼───────────────┘
+                                    ▼
+                            ┌───────────────┐
+                            │ Auth Stores   │
+                            │ - unified     │
+                            │ - appStore    │
+                            └───────────────┘
 ```
 
-### 8.4 Data Security
+#### 9.5.2 Token Configuration
 
-#### **Encryption**
-- **In Transit**: TLS 1.3 (HTTPS)
-- **At Rest**: AES-256 (DynamoDB, S3)
-- **Passwords**: bcrypt (cost factor: 12)
-- **Tokens**: HMAC-SHA256 signed
+| Configuration | Value | Description |
+|---------------|-------|-------------|
+| `PRIMARY_KEY` | `vyaparai_token` | Single unified token key |
+| `USER_TYPE_KEY` | `vyaparai_user_type` | User role identifier |
+| `USER_DATA_KEY` | `vyaparai_user_data` | Cached user profile |
+| `REFRESH_THRESHOLD_MS` | 5 minutes | Time before expiry to trigger refresh |
+| `IDLE_TIMEOUT_MS` | 30 minutes | Inactivity timeout |
+| `SESSION_CHECK_INTERVAL_MS` | 1 minute | Session validity check frequency |
 
-#### **Data Isolation**
-- **Multi-tenancy**: Store-level data isolation
-- **Query filters**: Automatic store_id filtering
-- **Database access**: Row-level security
+#### 9.5.3 Token Storage Keys (Unified)
 
-### 8.5 API Security
-
-#### **CORS Configuration**
-```python
-# Current (permissive - needs tightening)
-allow_origins = ["*"]
-
-# Recommended (production)
-allow_origins = [
-    "https://www.vyapaarai.com",
-    "https://vyapaarai.com",
-    "http://localhost:5173"  # Dev only
-]
-```
-
-#### **Rate Limiting**
-```python
-# Per endpoint rate limits
-@limiter.limit("100/hour")
-async def public_endpoint():
-    pass
-
-@limiter.limit("1000/hour")
-async def authenticated_endpoint():
-    pass
-```
-
-#### **Input Validation**
-- **Pydantic Models**: Type checking and validation
-- **SQL Injection**: Parameterized queries (DynamoDB safe by default)
-- **XSS Prevention**: HTML sanitization
-- **File Upload**: Size limits, type validation
-
-### 8.6 Compliance
-
-#### **Data Privacy**
-- **GDPR**: User data deletion on request (future)
-- **Indian IT Act**: Compliance (future)
-- **PCI DSS**: No card data stored (Razorpay handles)
-
-#### **Audit Logging**
-- All admin actions logged
-- Failed authentication attempts tracked
-- Data modification history (future)
-
----
-
-## 9. Core Features
-
-### 9.1 Smart Product Matching
-
-**Problem**: Stores add duplicate products with different names
-
-**Solution**: Multi-strategy matching algorithm
-
-#### **Strategy 1: Barcode Matching (Primary)**
-```python
-# Exact match on barcode
-if barcode:
-    existing = dynamodb.query(
-        IndexName='barcode-index',
-        KeyConditionExpression='barcode = :barcode'
-    )
-    if existing:
-        return existing  # 100% match
-```
-
-#### **Strategy 2: Image Hash Matching**
-```python
-# Perceptual hash comparison
-image_hash = generate_perceptual_hash(product_image)
-similar_products = find_similar_hashes(image_hash, threshold=5)
-# Hamming distance < 5 = very similar
-```
-
-#### **Strategy 3: Fuzzy Name Matching**
-```python
-# Levenshtein distance on normalized names
-normalized_name = normalize(product_name)  # lowercase, remove special chars
-for existing_product in catalog:
-    score = fuzzywuzzy.ratio(normalized_name, existing_product.name)
-    if score > 90:
-        suggestions.append(existing_product)
-```
-
-#### **Strategy 4: Multi-attribute Scoring**
-```python
-def calculate_match_score(product_a, product_b):
-    score = 0
-
-    # Name similarity (40%)
-    score += name_similarity(product_a.name, product_b.name) * 0.4
-
-    # Brand match (20%)
-    if product_a.brand == product_b.brand:
-        score += 0.2
-
-    # Category match (10%)
-    if product_a.category == product_b.category:
-        score += 0.1
-
-    # Attributes match (30%)
-    score += attribute_similarity(product_a.attrs, product_b.attrs) * 0.3
-
-    return score
-```
-
-### 9.2 Multi-Language Support
-
-#### **Supported Languages**
-1. English (en)
-2. Hindi (hi) - हिन्दी
-3. Tamil (ta) - தமிழ்
-4. Telugu (te) - తెలుగు
-5. Marathi (mr) - मराठी
-6. Gujarati (gu) - ગુજરાતી
-7. Kannada (kn) - ಕನ್ನಡ
-8. Malayalam (ml) - മലയാളം
-9. Bengali (bn) - বাংলা
-10. Punjabi (pa) - ਪੰਜਾਬੀ
-
-#### **Regional Names Feature**
-```python
-# Store region-specific product names
-product = {
-    "name": "Salt",  # English (default)
-    "regional_names": {
-        "IN-MH": ["मीठ", "मिठ"],           # Maharashtra (Marathi)
-        "IN-TN": ["உப்பு"],                 # Tamil Nadu (Tamil)
-        "IN-GJ": ["મીઠું", "મીઠુ"],         # Gujarat (Gujarati)
-        "IN-KA": ["ಉಪ್ಪು"],                 # Karnataka (Kannada)
-        # ...
-    }
+**Primary Keys (Active):**
+```typescript
+const TOKEN_CONFIG = {
+  PRIMARY_KEY: 'vyaparai_token',        // JWT token
+  USER_TYPE_KEY: 'vyaparai_user_type',  // customer|store_owner|admin|super_admin
+  USER_DATA_KEY: 'vyaparai_user_data',  // JSON user profile
 }
 ```
 
-#### **Language Detection**
-```python
-def detect_language(text):
-    # Unicode range detection
-    if is_devanagari(text):
-        return 'hi'  # Hindi/Marathi
-    elif is_tamil(text):
-        return 'ta'
-    # ...
-    return 'en'  # Default
-```
-
-### 9.3 CSV Bulk Upload
-
-#### **Upload Flow**
-```
-1. User uploads CSV file
-   ↓
-2. Store in S3 bucket
-   ↓
-3. Create job record (status: pending)
-   ↓
-4. Return job_id to user
-   ↓
-5. Lambda async processing:
-   - Parse CSV
-   - Validate rows
-   - Match products
-   - Create/update inventory
-   - Update progress
-   ↓
-6. Job completion (status: completed/failed)
-   ↓
-7. User polls for status updates
-```
-
-#### **CSV Format**
-```csv
-product_name,brand,barcode,category,cost_price,selling_price,mrp,stock,min_stock
-Tata Salt,Tata,8901234567890,Groceries,18.00,20.00,22.00,50,10
-Maggi Noodles,Nestle,8901058843095,Instant Food,12.00,14.00,15.00,100,20
-```
-
-#### **Error Handling**
-```python
-# Validation errors
-errors = [
-    {
-        "row": 5,
-        "error": "Invalid barcode format",
-        "data": {"barcode": "invalid123"}
-    },
-    {
-        "row": 12,
-        "error": "Duplicate product name",
-        "data": {"product_name": "Tata Salt"}
-    }
+**Legacy Keys (Migrated & Cleaned):**
+```typescript
+LEGACY_KEYS: [
+  'vyaparai_auth_token',    // Old auth token
+  'auth_token',             // Generic token
+  'customer_token',         // Customer-specific
+  'vyaparai_customer_token',
+  'vyaparai_admin_token',
 ]
-
-# Progress tracking
-progress = {
-    "total_rows": 100,
-    "processed": 75,
-    "successful": 70,
-    "failed": 5,
-    "percentage": 75.0
-}
 ```
 
-### 9.4 Inventory Alerts
+#### 9.5.4 TokenManager API
 
-#### **Low Stock Alert**
-```python
-# Automated low stock detection
-if product.current_stock <= product.min_stock_level:
-    send_alert(
-        type='low_stock',
-        product=product,
-        message=f"{product.name} is low on stock ({product.current_stock} remaining)"
-    )
+**File:** `frontend-pwa/src/utils/tokenManager.ts`
+
+```typescript
+// Core Token Operations
+tokenManager.getToken(): string | null
+tokenManager.getUserType(): UserType | null
+tokenManager.getUserData(): UserData | null
+tokenManager.setTokens(token: string, userType: UserType, userData?: UserData): void
+tokenManager.updateToken(newToken: string): void
+tokenManager.clearTokens(): void
+
+// Authentication State
+tokenManager.isAuthenticated(): boolean
+tokenManager.needsRefresh(): boolean
+tokenManager.getTokenData(): TokenData | null
+
+// JWT Parsing
+tokenManager.parseJWT(token: string): TokenPayload | null
+tokenManager.getUserId(): string | null
+tokenManager.getStoreId(): string | null
+
+// Event Subscriptions
+tokenManager.onTokenChange(callback): () => void  // Returns unsubscribe
+tokenManager.onIdle(callback): () => void         // Returns unsubscribe
+
+// Lifecycle
+tokenManager.initialize(): void
+tokenManager.cleanup(): void
+
+// Utilities
+tokenManager.getLoginPath(userType): string
+tokenManager.getDashboardPath(userType): string
+tokenManager.debugState(): void
 ```
 
-#### **Out of Stock Alert**
-```python
-# Zero stock notification
-if product.current_stock == 0:
-    send_alert(
-        type='out_of_stock',
-        product=product,
-        priority='high'
-    )
+#### 9.5.5 Multi-Tab Session Synchronization
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│     Tab 1       │                    │     Tab 2       │
+│  (Active)       │                    │  (Background)   │
+└────────┬────────┘                    └────────┬────────┘
+         │                                      │
+         │  User clicks "Logout"                │
+         │                                      │
+         ▼                                      │
+┌─────────────────┐                             │
+│ tokenManager    │                             │
+│ .clearTokens()  │                             │
+└────────┬────────┘                             │
+         │                                      │
+         │  localStorage.removeItem()           │
+         │                                      │
+         ▼                                      ▼
+┌─────────────────────────────────────────────────────────┐
+│              Browser Storage Event                       │
+│  key: 'vyaparai_token', oldValue: 'xxx', newValue: null │
+└─────────────────────────────────────────────────────────┘
+         │                                      │
+         │                                      ▼
+         │                             ┌─────────────────┐
+         │                             │ handleStorage   │
+         │                             │ Change()        │
+         │                             └────────┬────────┘
+         │                                      │
+         │                                      ▼
+         │                             ┌─────────────────┐
+         │                             │ Auto-logout &   │
+         │                             │ Redirect        │
+         │                             └─────────────────┘
 ```
 
-#### **Reorder Suggestions**
-```python
-# Smart reorder calculation
-def calculate_reorder_quantity(product, sales_history):
-    avg_daily_sales = calculate_average_daily_sales(sales_history)
-    lead_time_days = 7  # Supplier lead time
-    safety_stock = avg_daily_sales * 3  # 3 days buffer
+#### 9.5.6 Idle Session Timeout Flow
 
-    reorder_quantity = (avg_daily_sales * lead_time_days) + safety_stock
-    return round_up_to_case_size(reorder_quantity, product.case_size)
+```
+User Activity          TokenManager              Timer
+     │                      │                      │
+     │  mousedown/keydown   │                      │
+     ├─────────────────────▶│                      │
+     │                      │  resetIdleTimer()    │
+     │                      ├─────────────────────▶│
+     │                      │                      │ Clear existing
+     │                      │                      │ Start 30min timer
+     │                      │                      │
+     │    [30 min passes]   │                      │
+     │                      │◀─────────────────────┤ Timer fires
+     │                      │                      │
+     │                      │  notifyIdle()        │
+     │                      │  → logout()          │
+     │                      │  → redirect          │
 ```
 
-### 9.5 Order Management
+#### 9.5.7 API Client Integration
 
-#### **Order Creation**
-```python
-# Automatic stock deduction
-def create_order(items):
-    order = Order()
+All API clients use TokenManager for consistent token handling:
 
-    for item in items:
-        product = get_product(item.product_id)
+```typescript
+// Request Interceptor (all clients)
+apiClient.interceptors.request.use((config) => {
+  const token = tokenManager.getToken();  // ← Single source
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
-        # Validate stock availability
-        if product.current_stock < item.quantity:
-            raise InsufficientStockError()
-
-        # Deduct stock
-        update_stock(product, -item.quantity)
-
-        # Add to order
-        order.add_item(item)
-
-    # Calculate totals
-    order.calculate_totals()
-
-    # Save order
-    save_order(order)
-
-    return order
-```
-
-#### **Order Status Workflow**
-```
-pending → confirmed → packed → shipped → delivered
-                ↓
-            cancelled (anytime before shipped)
-```
-
-### 9.6 Admin Quality Control
-
-#### **Product Verification Workflow**
-```
-User adds product → Status: pending
-    ↓
-Admin reviews → Approve/Reject
-    ↓
-Approved → Status: verified
-Rejected → Status: flagged
-```
-
-#### **Quality Scoring**
-```python
-def calculate_quality_score(product):
-    score = 0
-
-    # Has barcode (+20)
-    if product.barcode:
-        score += 20
-
-    # Has image (+15)
-    if product.image:
-        score += 15
-
-    # Has brand (+10)
-    if product.brand:
-        score += 10
-
-    # Complete attributes (+25)
-    if all_attributes_filled(product):
-        score += 25
-
-    # Used by multiple stores (+30)
-    usage_bonus = min(product.stores_using_count * 2, 30)
-    score += usage_bonus
-
-    return min(score, 100)
-```
-
----
-
-## 10. Integration Points
-
-### 10.1 AWS Services
-
-#### **Lambda**
-- **Purpose**: Serverless compute
-- **Configuration**:
-  - Runtime: Python 3.11
-  - Memory: 1024 MB
-  - Timeout: 30 seconds
-  - Concurrency: 1000 (reserved)
-
-#### **DynamoDB**
-- **Purpose**: Primary database
-- **Configuration**:
-  - Mode: On-demand
-  - Encryption: AWS managed keys
-  - Point-in-time recovery: Enabled
-  - TTL: Enabled on passcodes table
-
-#### **S3**
-- **Purpose**: File storage
-- **Buckets**:
-  - `vyaparai-product-images-prod`: Product images
-  - `vyaparai-bulk-uploads-prod`: CSV uploads
-  - `vyaparai-frontend-prod`: Frontend static files
-- **Configuration**:
-  - Versioning: Enabled
-  - Encryption: AES-256
-  - CORS: Configured for frontend
-
-#### **CloudFront**
-- **Purpose**: CDN
-- **Configuration**:
-  - Origin: S3 bucket
-  - SSL/TLS: ACM certificate
-  - Caching: Optimized for static assets
-  - Compression: Gzip/Brotli enabled
-
-#### **API Gateway**
-- **Purpose**: API management
-- **Type**: HTTP API v2
-- **Configuration**:
-  - CORS: Enabled
-  - Throttling: 10,000 RPS
-  - Custom domain: api.vyaparai.com (planned)
-
-#### **SES**
-- **Purpose**: Email delivery
-- **Configuration**:
-  - Verified domain: vyaparai.com (planned)
-  - Templates: OTP emails
-  - Bounce handling: Configured
-
-#### **CloudWatch**
-- **Purpose**: Monitoring & logging
-- **Configuration**:
-  - Log retention: 30 days
-  - Metrics: Custom business metrics
-  - Alarms: Error rate, latency
-
-### 10.2 External APIs
-
-#### **Google Gemini AI**
-```python
-# Product description generation
-import google.generativeai as genai
-
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-
-model = genai.GenerativeModel('gemini-pro')
-response = model.generate_content(
-    f"Generate a concise product description for: {product_name}"
-)
-description = response.text
-```
-
-**Use Cases**:
-- Product description generation
-- Image analysis (product identification)
-- Natural language queries (future)
-
-#### **Razorpay**
-```python
-# Payment processing
-import razorpay
-
-client = razorpay.Client(
-    auth=(os.getenv('RAZORPAY_KEY_ID'),
-          os.getenv('RAZORPAY_KEY_SECRET'))
-)
-
-# Create order
-order = client.order.create({
-    'amount': amount * 100,  # Amount in paise
-    'currency': 'INR',
-    'receipt': order_id
-})
-```
-
-**Use Cases**:
-- Order payments
-- Subscription payments (future)
-- Refunds
-
-#### **Open Food Facts**
-```python
-# Product data enrichment
-import requests
-
-response = requests.get(
-    f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json"
-)
-
-if response.status_code == 200:
-    data = response.json()['product']
-
-    # Extract product info
-    product_info = {
-        'name': data.get('product_name'),
-        'brand': data.get('brands'),
-        'category': data.get('categories'),
-        'image_url': data.get('image_url'),
-        'nutritional_info': data.get('nutriments')
+// Response Interceptor (401 handling)
+apiClient.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error.response?.status === 401 && !isLoginEndpoint(url)) {
+      tokenManager.clearTokens();  // ← Centralized cleanup
+      window.location.href = getLoginPath(tokenManager.getUserType());
     }
+    return Promise.reject(error);
+  }
+);
 ```
 
-**Use Cases**:
-- Product data enrichment
-- Barcode lookup
-- Nutritional information
+#### 9.5.8 Auth Store Integration
 
-### 10.3 Firebase (Legacy/Optional)
-- **Purpose**: Real-time features
-- **Usage**: Limited (being phased out)
-- **Alternative**: WebSocket via API Gateway (planned)
+Both Zustand stores sync with TokenManager:
+
+**unifiedAuthStore.ts:**
+```typescript
+// On login
+tokenManager.setTokens(token, 'store_owner', userData);
+
+// On logout
+tokenManager.clearTokens();
+
+// On session validation
+const isValid = tokenManager.isAuthenticated();
+const storedToken = tokenManager.getToken();
+```
+
+**appStore.ts:**
+```typescript
+// Multi-tab sync subscription
+tokenManager.onTokenChange((newToken, newUserType) => {
+  if (!newToken) {
+    // Logout from another tab
+    useAppStore.setState({ isAuthenticated: false, user: null });
+  }
+});
+```
+
+#### 9.5.9 Initialization Flow
+
+```typescript
+// AppProviders.tsx
+useEffect(() => {
+  // 1. Initialize unified auth (includes tokenManager.initialize())
+  initializeUnifiedAuth();
+
+  // 2. Initialize app store (syncs with tokenManager)
+  initializeApp();
+
+  // 3. Cleanup on unmount
+  return () => tokenManager.cleanup();
+}, []);
+```
+
+#### 9.5.10 Security Features Summary
+
+| Feature | Implementation | Status |
+|---------|----------------|--------|
+| Single Token Key | `vyaparai_token` | ✅ Active |
+| Legacy Token Migration | Auto-migrate on init | ✅ Active |
+| Multi-Tab Sync | Storage event listener | ✅ Active |
+| Idle Timeout | 30-minute inactivity | ✅ Active |
+| Token Refresh Detection | 5-min before expiry | ✅ Active |
+| Session Validation | 1-minute interval | ✅ Active |
+| JWT Expiration Check | On every API call | ✅ Active |
+| Role-Based Redirects | User type aware | ✅ Active |
 
 ---
 
-## 11. Deployment Architecture
+## 10. Real-Time Features
 
-### 11.1 Current Deployment
+### 10.1 Enterprise WebSocket Architecture
 
-#### **Backend**
 ```
-Source Code → GitHub
-    ↓
-Local Build → zip deployment package
-    ↓
-AWS Lambda → Update function code
-    ↓
-API Gateway → Route requests
+┌─────────────┐     ┌─────────────────────┐     ┌─────────────────┐
+│   Frontend  │────▶│  API Gateway        │────▶│  WebSocket      │
+│   PWA       │     │  WebSocket API      │     │  Lambda Handler │
+└─────────────┘     └─────────────────────┘     └─────────────────┘
+                                                        │
+                                                        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    DynamoDB Connections Table                    │
+│  connectionId (PK) | storeId | user_type | connected_at        │
+└─────────────────────────────────────────────────────────────────┘
+                                                        │
+                                                        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    DynamoDB Orders Table (Streams)               │
+│  NEW_IMAGE triggers → WebSocket broadcast to store connections  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Deployment Command**:
+### 10.2 WebSocket Endpoints
+
+**Connection URL:** `wss://fjmrwbfi2m.execute-api.ap-south-1.amazonaws.com/prod`
+
+**Query Parameters:**
+- `store_id`: Store identifier
+- `user_type`: `store_owner` or `customer`
+
+**Events:**
+```typescript
+// Inbound (client → server)
+{ action: 'subscribe', store_id: 'str_123' }
+{ action: 'ping' }
+
+// Outbound (server → client)
+{ type: 'new_order', order: {...} }
+{ type: 'order_updated', order: {...} }
+{ type: 'pong' }
+{ type: 'subscribed', store_id: 'str_123' }
+```
+
+### 10.3 Frontend Integration
+
+```typescript
+// Connect to WebSocket
+const { status, isConnected, newOrders } = useEnterpriseWebSocket(storeId);
+
+// Subscribe to new orders
+enterpriseWebSocket.onNewOrder((notification) => {
+  toast.success(`New order from ${notification.order.customer_name}`);
+  playNotificationSound();
+  refreshOrdersList();
+});
+```
+
+### 10.4 DynamoDB Streams Integration
+
+- **Trigger**: INSERT/MODIFY on vyaparai-orders-prod
+- **Lambda**: vyaparai-stream-processor
+- **Action**: Broadcast to all connected store owners
+- **Latency**: <500ms from order creation to notification
+
+---
+
+## 11. Payment Integration
+
+### 11.1 Razorpay Integration Status
+
+| Component | Status |
+|-----------|--------|
+| Razorpay SDK (Backend) | Integrated (v2.0.0) |
+| Razorpay SDK (Frontend) | Integrated (v2.9.6) |
+| Payment API Endpoints | Complete (7 endpoints) |
+| Payment Methods | UPI, Card, COD, Wallet |
+| Checkout Flow | Complete |
+| Production Credentials | Not configured |
+| Webhooks | Not implemented |
+| Settlement System | Not implemented |
+
+### 11.2 Payment Flow
+
+```
+Customer → Select Items → Checkout
+                           ↓
+            Create Razorpay Order (backend)
+                           ↓
+            Open Razorpay Checkout (frontend)
+                           ↓
+            Payment Success/Failure
+                           ↓
+            Verify Signature (backend)
+                           ↓
+            Update Order Status
+```
+
+### 11.3 Payment Methods
+
+```python
+class PaymentMethod(Enum):
+    UPI = "upi"        # Google Pay, PhonePe, Paytm
+    CARD = "card"      # Debit/Credit Card
+    COD = "cod"        # Cash on Delivery
+    WALLET = "wallet"  # Paytm, Mobikwik, etc.
+```
+
+### 11.4 Configuration Required
+
+**Backend (.env.production):**
+```
+RAZORPAY_KEY_ID=rzp_live_xxxxxxxxxxxxx
+RAZORPAY_KEY_SECRET=xxxxxxxxxxxxxxxxxxxxx
+PAYMENT_MOCK_MODE=false
+```
+
+**Frontend (.env.production):**
+```
+VITE_RAZORPAY_KEY_ID=rzp_live_xxxxxxxxxxxxx
+```
+
+---
+
+## 12. Deployment Architecture
+
+### 12.1 Current Production Deployment
+
+#### **Backend (Lambda)**
+
+| Setting | Value |
+|---------|-------|
+| Function Name | vyaparai-backend-prod |
+| Runtime | Python 3.11 |
+| Architecture | x86_64 |
+| Memory | 1024 MB |
+| Timeout | 30 seconds |
+| Handler | lambda_handler.handler |
+| Package Size | ~37 MB |
+
+**Lambda Function URL:**
+`https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com`
+
+#### **Frontend (S3 + CloudFront)**
+
+| Setting | Value |
+|---------|-------|
+| S3 Bucket | www.vyapaarai.com |
+| CloudFront Distribution | E1UY93SVXV8QOF |
+| Domain | https://www.vyapaarai.com |
+| Build Tool | Vite |
+
+### 12.2 Deployment Procedures
+
+#### **Backend Deployment**
 ```bash
-cd backend/lambda-email-minimal/lambda-csv-minimal
-zip -r deployment.zip .
+# 1. Package application
+cd backend
+zip -r deployment.zip app/ lambda_handler.py -x "*.pyc" -x "*__pycache__*"
+
+# 2. Upload to S3
+aws s3 cp deployment.zip s3://vyaparai-lambda-deployments/backend/
+
+# 3. Update Lambda
 aws lambda update-function-code \
-  --function-name vyaparai-api-prod \
-  --zip-file fileb://deployment.zip
+  --function-name vyaparai-backend-prod \
+  --s3-bucket vyaparai-lambda-deployments \
+  --s3-key backend/deployment.zip
+
+# 4. Verify
+curl https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com/api/v1/health
 ```
 
-#### **Frontend**
-```
-Source Code → GitHub
-    ↓
-Vite Build → npm run build
-    ↓
-S3 Upload → aws s3 sync dist/ s3://bucket/
-    ↓
-CloudFront Invalidation → Cache clear
-```
-
-**Deployment Command**:
+#### **Frontend Deployment**
 ```bash
+# 1. Build
 cd frontend-pwa
 npm run build
-aws s3 sync dist/ s3://vyaparai-frontend-prod/ --delete
+
+# 2. Deploy to S3
+aws s3 sync dist/ s3://www.vyapaarai.com/ --delete
+
+# 3. Invalidate CloudFront
 aws cloudfront create-invalidation \
-  --distribution-id E1234567890ABC \
+  --distribution-id E1UY93SVXV8QOF \
   --paths "/*"
 ```
 
-### 11.2 Environment Configuration
+### 12.3 Environment Variables
 
-#### **Environments**
-1. **Development** (Local)
-   - Local FastAPI server (uvicorn)
-   - Local React dev server (Vite)
-   - DynamoDB local (optional)
+**Backend Lambda:**
+```
+ENVIRONMENT=production
+AWS_REGION=ap-south-1
+USE_DYNAMODB=true
+USE_POSTGRESQL=true
 
-2. **Staging** (Planned)
-   - Separate Lambda function
-   - Separate DynamoDB tables
-   - Subdomain: staging.vyaparai.com
+# DynamoDB Tables
+DYNAMODB_ORDERS_TABLE=vyaparai-orders-prod
+DYNAMODB_CUSTOMERS_TABLE=vyaparai-customers-prod
+DYNAMODB_STORES_TABLE=vyaparai-stores-prod
+DYNAMODB_STOCK_TABLE=vyaparai-stock-prod
 
-3. **Production**
-   - Lambda: vyaparai-api-prod
-   - DynamoDB: *-prod tables
-   - Domain: www.vyaparai.com
+# Authentication
+JWT_SECRET=<32+ chars secure secret>
+JWT_ALGORITHM=HS256
 
-#### **Environment Variables**
-```bash
-# Backend Lambda
-GLOBAL_PRODUCTS_TABLE=vyaparai-global-products-prod
-STORE_INVENTORY_TABLE=vyaparai-store-inventory-prod
-JWT_SECRET=vyaparai-jwt-secret-2024-secure
-GEMINI_API_KEY=<secret>
-RAZORPAY_KEY_ID=<secret>
-RAZORPAY_KEY_SECRET=<secret>
+# External APIs
+GOOGLE_MAPS_API_KEY=<api_key>
+RAZORPAY_KEY_ID=<key_id>
+RAZORPAY_KEY_SECRET=<key_secret>
+```
 
-# Frontend
+**Frontend:**
+```
 VITE_API_URL=https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com
-VITE_GEMINI_API_KEY=<secret>
+VITE_WS_URL=wss://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com
+VITE_REALTIME_WS_URL=wss://fjmrwbfi2m.execute-api.ap-south-1.amazonaws.com/prod
+VITE_ENV=production
+VITE_ENABLE_MOCK_DATA=false
+VITE_RAZORPAY_KEY_ID=<key_id>
 ```
-
-### 11.3 CI/CD Pipeline (Planned)
-
-```yaml
-# .github/workflows/deploy-prod.yml
-name: Deploy Production
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy-backend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Package Lambda
-        run: |
-          cd backend/lambda-email-minimal/lambda-csv-minimal
-          zip -r deployment.zip .
-      - name: Deploy to Lambda
-        run: |
-          aws lambda update-function-code \
-            --function-name vyaparai-api-prod \
-            --zip-file fileb://deployment.zip
-
-  deploy-frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Build
-        run: |
-          cd frontend-pwa
-          npm ci
-          npm run build
-      - name: Deploy to S3
-        run: |
-          aws s3 sync dist/ s3://vyaparai-frontend-prod/
-      - name: Invalidate CloudFront
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CF_DIST_ID }} \
-            --paths "/*"
-```
-
-### 11.4 Monitoring & Alerting
-
-#### **CloudWatch Dashboards**
-1. **API Performance**
-   - Request count
-   - Error rate
-   - Latency (p50, p95, p99)
-   - Lambda duration
-
-2. **Business Metrics**
-   - Active stores
-   - Orders per hour
-   - Products added per day
-   - User registrations
-
-#### **Alarms**
-```python
-# High error rate alarm
-{
-    "AlarmName": "vyaparai-api-high-error-rate",
-    "MetricName": "Errors",
-    "Namespace": "AWS/Lambda",
-    "Statistic": "Average",
-    "Period": 300,
-    "EvaluationPeriods": 1,
-    "Threshold": 0.05,  # 5% error rate
-    "ComparisonOperator": "GreaterThanThreshold",
-    "AlarmActions": ["arn:aws:sns:ap-south-1:123456:alerts"]
-}
-```
-
-### 11.5 Disaster Recovery
-
-#### **Backup Strategy**
-- **DynamoDB**: Point-in-time recovery (35 days)
-- **S3**: Versioning + cross-region replication (planned)
-- **Lambda**: Version control via git + tagged releases
-
-#### **Recovery Procedures**
-1. **Database Recovery**
-   ```bash
-   aws dynamodb restore-table-to-point-in-time \
-     --source-table-name vyaparai-stores-prod \
-     --target-table-name vyaparai-stores-prod-restored \
-     --restore-date-time 2025-10-07T10:00:00Z
-   ```
-
-2. **Lambda Rollback**
-   ```bash
-   aws lambda update-function-code \
-     --function-name vyaparai-api-prod \
-     --zip-file fileb://previous-deployment.zip
-   ```
-
-3. **Frontend Rollback**
-   ```bash
-   aws s3 sync s3://backup-bucket/ s3://prod-bucket/ --delete
-   ```
 
 ---
 
-## 12. Future Roadmap
+## 13. Customer Experience
 
-### 12.1 Short-term (Q1 2026)
+### 13.1 Customer Journey
 
-#### **Feature: Staging Environment**
-- Priority: High
-- Effort: Medium
-- Benefit: Safe testing before production
+```
+1. Store Discovery
+   ├── GPS-based search (nearby stores)
+   ├── Pincode/landmark search
+   └── City/state filter
+           ↓
+2. Store Selection
+   ├── View store details
+   ├── Check opening hours
+   └── Browse products inline
+           ↓
+3. Shopping
+   ├── Add products to cart
+   ├── Adjust quantities
+   └── 30-minute cart expiration timer
+           ↓
+4. Checkout
+   ├── Select/add delivery address
+   ├── Choose payment method
+   └── Place order (Saga pattern)
+           ↓
+5. Order Tracking
+   ├── Real-time status updates
+   ├── Push notifications
+   └── Order history
+```
 
-#### **Feature: API Gateway CORS Migration**
-- Priority: High
-- Effort: Low
-- Benefit: 80% reduction in OPTIONS Lambda invocations
+### 13.2 Customer Pages
 
-#### **Feature: Enhanced Search**
-- Priority: High
-- Effort: High
-- Benefit: Faster product search with OpenSearch
+| Page | Route | Purpose |
+|------|-------|---------|
+| Auth | /customer/auth | Login/Register with OTP |
+| Store Selector | /customer/stores | Find nearby stores |
+| Store Details | /customer/store/:id | View store + products |
+| Product Catalog | /customer/products | Browse products |
+| Cart | /customer/cart | Shopping cart (30min TTL) |
+| Checkout | /customer/checkout | Order placement |
+| Orders | /customer/orders | Order history |
+| Order Details | /customer/orders/:id | Single order |
+| Tracking | /customer/orders/:id/tracking | Live tracking |
 
-#### **Feature: Mobile App (React Native)**
-- Priority: Medium
-- Effort: High
-- Benefit: Better mobile experience
+### 13.3 Cart Features
 
-### 12.2 Mid-term (Q2-Q3 2026)
-
-#### **Feature: Supplier Management**
-- Priority: Medium
-- Effort: Medium
-- Benefit: Purchase order automation
-
-#### **Feature: Advanced Analytics**
-- Priority: Medium
-- Effort: Medium
-- Benefit: Sales forecasting, trend analysis
-
-#### **Feature: Multi-store Management**
-- Priority: Medium
-- Effort: High
-- Benefit: Chain store support
-
-#### **Feature: Customer Portal**
-- Priority: Low
-- Effort: High
-- Benefit: Online ordering for customers
-
-### 12.3 Long-term (Q4 2026+)
-
-#### **Feature: AI-powered Demand Forecasting**
-- Technology: ML models on SageMaker
-- Benefit: Optimize inventory levels
-
-#### **Feature: IoT Integration**
-- Technology: IoT Core + smart scales
-- Benefit: Automated stock tracking
-
-#### **Feature: Blockchain Traceability**
-- Technology: Managed Blockchain
-- Benefit: Supply chain transparency
-
-#### **Feature: Voice Commerce**
-- Technology: Alexa Skills + Google Assistant
-- Benefit: Voice-based ordering
-
-### 12.4 Technical Debt
-
-#### **High Priority**
-1. **CORS Security**: Restrict origins to specific domains
-2. **Error Handling**: Standardize error responses
-3. **API Documentation**: Generate OpenAPI docs
-4. **Test Coverage**: Unit tests for critical paths
-5. **Code Splitting**: Reduce frontend bundle size
-
-#### **Medium Priority**
-1. **Database Indexes**: Optimize query performance
-2. **Caching Layer**: Add Redis for frequently accessed data
-3. **Rate Limiting**: Implement per-user limits
-4. **Logging**: Structured logging with correlation IDs
-5. **Monitoring**: Custom business metrics
-
-#### **Low Priority**
-1. **Code Refactoring**: Break down large functions
-2. **Type Safety**: Add Pydantic models everywhere
-3. **Documentation**: Inline code documentation
-4. **Accessibility**: WCAG 2.1 compliance
-5. **SEO**: Server-side rendering (SSR)
+- **30-minute expiration timer** with visual countdown
+- **Backend sync** for persistent carts
+- **Guest cart migration** on login
+- **Stock validation** before checkout
+- **Special instructions** per item
 
 ---
 
-## 13. Appendices
+## 14. Store Owner Features
 
-### Appendix A: Glossary
+### 14.1 Dashboard
+
+**StoreOwnerDashboardEnhanced** provides:
+- Real-time order feed with WebSocket
+- Daily/weekly/monthly sales stats
+- Low stock alerts
+- Quick order actions (accept/reject)
+- Revenue analytics
+
+### 14.2 Inventory Management
+
+- **Product CRUD**: Add, edit, delete products
+- **Barcode scanning**: Mobile camera integration
+- **Bulk upload**: CSV/XLSX import
+- **Stock alerts**: Low stock notifications
+- **Atomic updates**: Race condition prevention
+
+### 14.3 Order Management
+
+- **Real-time notifications**: WebSocket + push
+- **Status workflow**: pending → confirmed → processing → out_for_delivery → delivered
+- **Order details modal**: Customer info, items, totals
+- **Export**: CSV/PDF export
+- **History**: Paginated order history with filters
+
+---
+
+## 15. Admin Features
+
+### 15.1 Admin Dashboard
+
+- Global product catalog management
+- Store verification
+- User management
+- Analytics overview
+
+### 15.2 Product Catalog
+
+- View all global products
+- Create/edit/delete products
+- Verification workflow
+- Quality scoring
+
+---
+
+## 16. Future Roadmap
+
+### 16.1 Short-term (Q1 2026)
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| Production Razorpay keys | High | Pending |
+| Payment webhooks | High | Not started |
+| Settlement system | High | Not started |
+| Commission engine | High | Not started |
+
+### 16.2 Mid-term (Q2-Q3 2026)
+
+| Feature | Priority |
+|---------|----------|
+| Multi-store management | Medium |
+| Advanced analytics | Medium |
+| Supplier management | Medium |
+| AI demand forecasting | Medium |
+
+### 16.3 Long-term (Q4 2026+)
+
+| Feature | Priority |
+|---------|----------|
+| Mobile native apps | Low |
+| Voice commerce | Low |
+| Blockchain traceability | Low |
+| IoT integration | Low |
+
+---
+
+## 17. Appendices
+
+### 17.1 Glossary
 
 | Term | Definition |
 |------|------------|
-| **Kirana** | Traditional Indian retail store |
-| **SKU** | Stock Keeping Unit - unique product identifier |
-| **HSN Code** | Harmonized System of Nomenclature - tax classification |
-| **MRP** | Maximum Retail Price - legal requirement in India |
-| **GST** | Goods and Services Tax - Indian tax system |
-| **PWA** | Progressive Web App - installable web application |
-| **JWT** | JSON Web Token - authentication mechanism |
-| **ASGI** | Asynchronous Server Gateway Interface |
-| **NoSQL** | Non-relational database (DynamoDB) |
-| **CDN** | Content Delivery Network (CloudFront) |
+| Kirana | Traditional Indian retail store |
+| SKU | Stock Keeping Unit |
+| HSN | Harmonized System Nomenclature (tax code) |
+| MRP | Maximum Retail Price |
+| GST | Goods and Services Tax |
+| PWA | Progressive Web App |
+| JWT | JSON Web Token |
+| ASGI | Asynchronous Server Gateway Interface |
+| Saga | Distributed transaction pattern |
 
-### Appendix B: API Endpoint Quick Reference
+### 17.2 Quick Reference
 
-**Authentication**
-- `POST /api/v1/auth/send-email-passcode` - Send OTP
-- `POST /api/v1/auth/verify-email-passcode` - Verify OTP
-- `POST /api/v1/auth/login-with-password` - Login
+**API Base URL:** `https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com`
 
-**Inventory**
-- `GET /api/v1/inventory/products` - List products
-- `POST /api/v1/inventory/products` - Add product
-- `PUT /api/v1/inventory/products/{id}` - Update product
-- `DELETE /api/v1/inventory/products/{id}` - Delete product
+**WebSocket URL:** `wss://fjmrwbfi2m.execute-api.ap-south-1.amazonaws.com/prod`
 
-**Orders**
-- `GET /api/v1/orders` - List orders
-- `POST /api/v1/orders` - Create order
-- `PUT /api/v1/orders/{id}/status` - Update status
+**Frontend URL:** `https://www.vyapaarai.com`
 
-**Admin**
-- `GET /api/v1/admin/products/global` - List global products
-- `POST /api/v1/admin/products/global` - Create global product
-- `DELETE /api/v1/admin/products/{id}` - Delete product
+**Health Check:** `GET /api/v1/health`
 
-### Appendix C: Database Tables Quick Reference
+### 17.3 Useful Commands
 
-| Table | Purpose | Primary Key |
-|-------|---------|-------------|
-| vyaparai-stores-prod | Store profiles | store_id |
-| vyaparai-global-products-prod | Product catalog | product_id |
-| vyaparai-store-inventory-prod | Store inventory | store_id + product_id |
-| vyaparai-orders-prod | Customer orders | order_id |
-| vyaparai-users-prod | User accounts | user_id |
-| vyaparai-sessions-prod | Auth sessions | email + session_id |
-| vyaparai-passcodes-prod | OTP codes | email |
-| vyaparai-categories-prod | Product categories | category_id |
-| vyaparai-bulk-upload-jobs-prod | CSV jobs | job_id |
-
-### Appendix D: Environment Setup
-
-**Prerequisites**
 ```bash
-# Backend
-Python 3.11+
-pip install -r requirements.txt
+# Deploy backend
+aws lambda update-function-code --function-name vyaparai-backend-prod ...
 
-# Frontend
-Node.js 18+
-npm install -g yarn
-yarn install
+# Deploy frontend
+aws s3 sync dist/ s3://www.vyapaarai.com/ --delete
+aws cloudfront create-invalidation --distribution-id E1UY93SVXV8QOF --paths "/*"
 
-# AWS CLI
-aws configure
+# Check logs
+aws logs tail /aws/lambda/vyaparai-backend-prod --follow
+
+# Test API
+curl https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com/api/v1/health
 ```
-
-**Local Development**
-```bash
-# Backend
-cd backend/lambda-email-minimal/lambda-csv-minimal
-uvicorn lambda_handler:app --reload --port 8000
-
-# Frontend
-cd frontend-pwa
-yarn dev
-```
-
-### Appendix E: Troubleshooting Guide
-
-**Issue: CORS errors**
-- Check CORS middleware is imported
-- Verify OPTIONS handler exists
-- Check API Gateway CORS config
-
-**Issue: Lambda cold starts**
-- Increase memory allocation
-- Use provisioned concurrency
-- Optimize import statements
-
-**Issue: DynamoDB throttling**
-- Switch to on-demand mode
-- Optimize query patterns
-- Add caching layer
-
-**Issue: High API latency**
-- Check CloudWatch logs
-- Optimize database queries
-- Add CloudFront caching
 
 ---
 
@@ -2281,10 +1822,14 @@ yarn dev
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
-| 1.0 | 2025-10-08 | Development Team | Initial comprehensive TDD |
+| 1.0 | 2025-10-08 | Dev Team | Initial TDD |
+| 1.1 | 2025-11-11 | Dev Team | Customer experience section |
+| 1.2 | 2025-12-04 | Dev Team | Store discovery geocoding |
+| 1.3 | 2025-12-12 | Dev Team | Saga pattern checkout |
+| 2.0 | 2025-12-23 | Dev Team | **Complete rewrite**: Full codebase documentation, WebSocket real-time features, payment integration analysis, updated metrics, all API endpoints, all services, all frontend components |
 
 ---
 
 **End of Technical Design Document**
 
-*For questions or clarifications, contact: dev@vyaparai.com*
+*For questions: dev@vyaparai.com*
