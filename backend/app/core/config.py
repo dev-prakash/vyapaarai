@@ -35,6 +35,21 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
 
+    # Firebase Cloud Messaging
+    FIREBASE_CREDENTIALS_JSON: Optional[str] = None  # Base64 encoded service account JSON
+    FIREBASE_CREDENTIALS_PATH: Optional[str] = None  # Path to service account JSON file
+    FIREBASE_PROJECT_ID: str = "vyapaarai-barcode-scanner"
+    ENABLE_PUSH_NOTIFICATIONS: bool = True
+
+    # Gupshup SMS Service (for OTP delivery)
+    # Sign up at https://enterprise.smsgupshup.com/
+    GUPSHUP_USERID: Optional[str] = None
+    GUPSHUP_PASSWORD: Optional[str] = None
+    GUPSHUP_SENDER_ID: str = "VYAPAR"  # 6 character sender ID registered with DLT
+    GUPSHUP_ENTITY_ID: Optional[str] = None  # DLT Principal Entity ID (required for India)
+    GUPSHUP_OTP_TEMPLATE_ID: Optional[str] = None  # DLT registered OTP template ID
+    ENABLE_SMS: bool = True  # Master toggle for SMS service
+
     class Config:
         env_file = ".env"
 

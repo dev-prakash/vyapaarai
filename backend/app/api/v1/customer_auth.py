@@ -37,6 +37,7 @@ from app.core.cache import (
 )
 from app.core.database import get_dynamodb, CUSTOMERS_TABLE
 from app.services.geocoding_service import geocoding_service
+from app.services.sms_service import sms_service, send_otp_sms
 
 logger = logging.getLogger(__name__)
 
@@ -712,10 +713,15 @@ async def send_otp(request: SendOTPRequest):
                 detail="Failed to store OTP. Please try again."
             )
 
-        # TODO: Send OTP via SMS service (AWS SNS, Twilio, etc.)
-        # Mask phone number in logs for privacy
+        # Send OTP via SMS (Gupshup)
         masked_phone = request.phone[-4:].rjust(len(request.phone), '*')
-        logger.info(f"OTP generated for {masked_phone}")
+        sms_result = await send_otp_sms(request.phone, otp)
+
+        if sms_result.success:
+            logger.info(f"OTP sent via SMS to {masked_phone}")
+        else:
+            # Log the error but don't fail - OTP is still stored for verification
+            logger.warning(f"SMS delivery failed for {masked_phone}: {sms_result.error}")
 
         # Only return OTP in development mode for testing
         # In production, OTP is sent via SMS and NOT returned in response
