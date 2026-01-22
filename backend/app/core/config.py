@@ -17,10 +17,16 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     DYNAMODB_ENDPOINT: Optional[str] = None
 
-    # DynamoDB Tables
+    # DynamoDB Tables - Core
     DYNAMODB_ORDERS_TABLE: Optional[str] = "vyaparai-orders-dev"
     DYNAMODB_STORES_TABLE: Optional[str] = "vyaparai-stores-dev"
     DYNAMODB_CUSTOMERS_TABLE: Optional[str] = "vyaparai-customers-dev"
+
+    # DynamoDB Tables - Khata (Digital Credit Management)
+    DYNAMODB_KHATA_TRANSACTIONS_TABLE: Optional[str] = "vyaparai-khata-transactions-dev"
+    DYNAMODB_CUSTOMER_BALANCES_TABLE: Optional[str] = "vyaparai-customer-balances-dev"
+    DYNAMODB_PAYMENT_REMINDERS_TABLE: Optional[str] = "vyaparai-payment-reminders-dev"
+    DYNAMODB_IDEMPOTENCY_KEYS_TABLE: Optional[str] = "vyaparai-idempotency-keys-dev"
 
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000"]
@@ -48,7 +54,17 @@ class Settings(BaseSettings):
     GUPSHUP_SENDER_ID: str = "VYAPAR"  # 6 character sender ID registered with DLT
     GUPSHUP_ENTITY_ID: Optional[str] = None  # DLT Principal Entity ID (required for India)
     GUPSHUP_OTP_TEMPLATE_ID: Optional[str] = None  # DLT registered OTP template ID
+    GUPSHUP_PAYMENT_REMINDER_TEMPLATE_ID: Optional[str] = None  # DLT template for payment reminders
+    GUPSHUP_PAYMENT_CONFIRM_TEMPLATE_ID: Optional[str] = None  # DLT template for payment confirmations
+    GUPSHUP_CREDIT_SALE_TEMPLATE_ID: Optional[str] = None  # DLT template for credit sale notifications
     ENABLE_SMS: bool = True  # Master toggle for SMS service
+
+    # Khata Rate Limiting
+    MAX_REMINDERS_PER_CUSTOMER_PER_DAY: int = 3  # Max SMS reminders per customer per day
+    MAX_REMINDERS_PER_STORE_PER_HOUR: int = 100  # Max SMS reminders per store per hour
+
+    # Khata Encryption
+    KHATA_ENCRYPTION_KEY: Optional[str] = None  # Fernet key for PII encryption (32 chars base64)
 
     class Config:
         env_file = ".env"
