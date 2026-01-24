@@ -177,3 +177,92 @@ cd backend && uvicorn app.main:app --reload
 ./scripts/pre_deploy_check.sh
 ./scripts/release.sh 1.0.0
 ```
+
+---
+
+## Auto-Test Slash Commands
+
+### /auto-test
+Analyze recent commits and prepare for test generation.
+
+**Execution:**
+```bash
+./scripts/auto_test.sh
+```
+
+**What it does:**
+1. Identifies changed Python files from last commit
+2. Detects change type (fix/feature/refactor) from commit message
+3. Checks which files have existing tests
+4. Saves analysis to /tmp/vyapaarai_auto_test/
+5. Recommends test markers to use
+
+---
+
+### /generate-tests-from-analysis
+Generate tests based on the /auto-test analysis.
+
+**Prerequisites:** Run /auto-test first
+
+**Execution steps:**
+
+1. Read analysis files:
+```bash
+CHANGE_TYPE=$(cat /tmp/vyapaarai_auto_test/change_type.txt)
+COMMIT_MSG=$(cat /tmp/vyapaarai_auto_test/commit_msg.txt)
+cat /tmp/vyapaarai_auto_test/changed_files.txt
+cat /tmp/vyapaarai_auto_test/files_without_tests.txt
+```
+
+2. For each file that needs tests:
+   - Read the source file: `cat <filepath>`
+   - Identify all functions, classes, DynamoDB operations
+   - Generate appropriate tests based on CHANGE_TYPE
+
+3. Apply markers based on CHANGE_TYPE:
+   - "fix" → ALL tests get `@pytest.mark.regression`
+   - "feature" → Mix of `@pytest.mark.unit` and `@pytest.mark.regression`
+   - "refactor" → Primarily `@pytest.mark.unit`
+
+4. Save tests to: `backend/tests/unit/test_<module>.py`
+
+5. Run tests to verify: `pytest backend/tests/unit/test_<module>.py -v`
+
+---
+
+### /test-file <filepath>
+Generate tests for a specific file (ignores recent commits).
+
+**Execution:**
+1. Read the file: `cat <filepath>`
+2. Analyze all functions, classes, and logic
+3. Generate comprehensive tests (happy path, edge cases, errors)
+4. Mark critical business logic with `@pytest.mark.regression`
+5. Save to `backend/tests/unit/test_<module>.py`
+6. Run tests to verify
+
+---
+
+## Test Generation Rules
+
+### ALWAYS:
+- Author: DevPrakash (never mention AI/Claude)
+- Use fixtures from conftest.py (dynamodb_mock, sample_store, etc.)
+- Run tests after generating to verify they pass
+
+### Markers by Change Type:
+| Change Type | Commit Prefix | Test Markers |
+|-------------|---------------|--------------|
+| Bug Fix | `fix:` | ALL `@pytest.mark.regression` |
+| Feature | `feat:` | Mix of `unit` and `regression` |
+| Refactor | `refactor:` | Primarily `unit` |
+
+### Test Naming Convention:
+```
+test_<function>_<scenario>_<expected_result>
+```
+
+Examples:
+- `test_register_store_with_valid_data_succeeds`
+- `test_register_store_with_missing_phone_fails`
+- `test_cancel_order_restores_inventory`
