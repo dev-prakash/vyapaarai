@@ -1,6 +1,51 @@
-# VyapaarAI - Project Configuration
+# VyapaarAI - Claude Code Instructions
 
-## Developer: DevPrakash
+## WORKFLOW TRIGGERS (Read First!)
+
+When a user prompt starts with these keywords, IMMEDIATELY read `WORKFLOWS.md` and execute the corresponding workflow:
+
+| Trigger | Action |
+|---------|--------|
+| `Bug:` | Read WORKFLOWS.md → Execute "WORKFLOW: Bug Fix" |
+| `Feature:` | Read WORKFLOWS.md → Execute "WORKFLOW: New Feature" |
+| `Refactor:` | Read WORKFLOWS.md → Execute "WORKFLOW: Refactor" |
+| `Hotfix:` | Read WORKFLOWS.md → Execute "WORKFLOW: Hotfix" |
+
+### Examples
+```
+Bug: Store registration allows invalid phone numbers with less than 10 digits
+```
+→ Claude Code reads WORKFLOWS.md and executes full bug fix workflow automatically.
+
+```
+Feature: Add SMS notification when customer credit exceeds 80% of limit
+```
+→ Claude Code reads WORKFLOWS.md and executes full feature workflow automatically.
+
+### What Happens Automatically
+
+1. Creates appropriate branch (fix/, feature/, etc.)
+2. Implements enterprise-grade code
+3. Tests via Chrome MCP (if applicable)
+4. Commits with proper message format
+5. Generates regression/unit tests
+6. Verifies all tests pass
+7. Merges to develop
+8. Updates documentation
+9. Generates summary report
+
+### Critical Rule
+
+**ALWAYS ask for user confirmation** before:
+- Starting implementation (after showing the plan)
+- Merging to develop
+- Any destructive operations
+
+---
+
+## Project Configuration
+
+### Developer: DevPrakash
 
 ## Git Configuration
 - Name: DevPrakash
