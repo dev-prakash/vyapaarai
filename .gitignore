@@ -193,3 +193,8 @@ backup_before_cleanup_*/
 
 # Local development
 .local
+
+# Backup directories
+*_backup_*/
+backup_*/
+
