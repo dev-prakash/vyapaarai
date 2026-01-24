@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from decimal import Decimal
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -15,6 +16,19 @@ import uuid
 
 # AWS SDK
 import boto3
+
+
+def float_to_decimal(obj: Any) -> Any:
+    """Convert float values to Decimal recursively for DynamoDB compatibility"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: float_to_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [float_to_decimal(item) for item in obj]
+    return obj
+
+
 from botocore.exceptions import ClientError, NoCredentialsError
 
 # PostgreSQL
@@ -44,6 +58,14 @@ class OrderData:
     created_at: str
     updated_at: str
     ttl: Optional[int] = None
+    # Additional fields for customer orders
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    delivery_address: Optional[str] = None
+    delivery_notes: Optional[str] = None
+    order_number: Optional[str] = None
+    tracking_id: Optional[str] = None
 
 @dataclass
 class SessionData:
@@ -196,18 +218,26 @@ class HybridDatabase:
             item = {
                 'id': order_data.order_id,  # RANGE key (sort key)
                 'store_id': order_data.store_id,  # HASH key (partition key)
-                'customer_id': order_data.customer_phone,  # Used by GSI
+                # Use actual customer_id if available, otherwise fallback to phone
+                'customer_id': order_data.customer_id or order_data.customer_phone,
                 'customer_phone': order_data.customer_phone,
-                'items': order_data.items,
-                'total_amount': order_data.total_amount,
+                'customer_name': order_data.customer_name or '',
+                'items': float_to_decimal(order_data.items),  # Convert floats to Decimal
+                'total_amount': float_to_decimal(order_data.total_amount),
                 'status': order_data.status,
                 'channel': order_data.channel,
                 'language': order_data.language,
                 'intent': order_data.intent,
-                'confidence': order_data.confidence,
-                'entities': order_data.entities,
+                'confidence': float_to_decimal(order_data.confidence),
+                'entities': float_to_decimal(order_data.entities),
                 'created_at': order_data.created_at,
-                'updated_at': order_data.updated_at
+                'updated_at': order_data.updated_at,
+                # Additional fields for complete order details
+                'payment_method': order_data.payment_method or 'cod',
+                'delivery_address': order_data.delivery_address or '',
+                'delivery_notes': order_data.delivery_notes or '',
+                'order_number': order_data.order_number or order_data.order_id,
+                'tracking_id': order_data.tracking_id or ''
             }
 
             if order_data.ttl:
@@ -234,7 +264,7 @@ class HybridDatabase:
     async def get_order(self, order_id: str) -> HybridOrderResult:
         """Get order from DynamoDB"""
         start_time = time.time()
-        
+
         if not self.dynamodb:
             return HybridOrderResult(
                 success=False,
@@ -245,33 +275,42 @@ class HybridDatabase:
 
         try:
             table = self.dynamodb.Table(self.table_names['orders'])
-            
-            # Query by order_id using GSI
+
+            # Query by order_id using order-id-index GSI
             response = await asyncio.to_thread(
                 table.query,
-                IndexName='GSI1',
-                KeyConditionExpression='gsi1pk = :pk',
+                IndexName='order-id-index',
+                KeyConditionExpression='id = :order_id',
                 ExpressionAttributeValues={
-                    ':pk': f"ORDER#{order_id}"
+                    ':order_id': order_id
                 }
             )
 
             if response['Items']:
                 item = response['Items'][0]
+                # NOTE: Field is stored as 'id' not 'order_id' in DynamoDB
                 order_data = OrderData(
-                    order_id=item['order_id'],
-                    customer_phone=item['customer_phone'],
-                    store_id=item['store_id'],
-                    items=item['items'],
-                    total_amount=item['total_amount'],
-                    status=item['status'],
-                    channel=item['channel'],
-                    language=item['language'],
-                    intent=item['intent'],
-                    confidence=item['confidence'],
-                    entities=item['entities'],
-                    created_at=item['created_at'],
-                    updated_at=item['updated_at']
+                    order_id=item.get('id', item.get('order_id', '')),  # Handle both field names
+                    customer_phone=item.get('customer_phone', ''),
+                    store_id=item.get('store_id', ''),
+                    items=item.get('items', []),
+                    total_amount=item.get('total_amount', 0),
+                    status=item.get('status', 'unknown'),
+                    channel=item.get('channel', 'web'),
+                    language=item.get('language', 'en'),
+                    intent=item.get('intent', ''),
+                    confidence=item.get('confidence', 0),
+                    entities=item.get('entities', []),
+                    created_at=item.get('created_at', ''),
+                    updated_at=item.get('updated_at', ''),
+                    # Additional customer order fields
+                    customer_id=item.get('customer_id'),
+                    customer_name=item.get('customer_name'),
+                    payment_method=item.get('payment_method'),
+                    delivery_address=item.get('delivery_address'),
+                    delivery_notes=item.get('delivery_notes'),
+                    order_number=item.get('order_number'),
+                    tracking_id=item.get('tracking_id')
                 )
 
                 return HybridOrderResult(
@@ -389,6 +428,153 @@ class HybridDatabase:
                     entities=item['entities'],
                     created_at=item['created_at'],
                     updated_at=item['updated_at']
+                )
+                orders.append(order_data)
+
+            return HybridOrderResult(
+                success=True,
+                data=orders,
+                processing_time_ms=(time.time() - start_time) * 1000,
+                source="dynamodb"
+            )
+
+        except ClientError as e:
+            logger.error(f"DynamoDB error getting customer orders: {e}")
+            return HybridOrderResult(
+                success=False,
+                error=str(e),
+                processing_time_ms=(time.time() - start_time) * 1000,
+                source="dynamodb"
+            )
+
+    async def get_orders_by_store(self, store_id: str, limit: int = 50, offset: int = 0) -> HybridOrderResult:
+        """Get orders for a store from DynamoDB using GSI"""
+        start_time = time.time()
+
+        if not self.dynamodb:
+            return HybridOrderResult(
+                success=False,
+                error="DynamoDB not initialized",
+                processing_time_ms=(time.time() - start_time) * 1000,
+                source="dynamodb"
+            )
+
+        try:
+            table = self.dynamodb.Table(self.table_names['orders'])
+
+            # Query using GSI on store_id
+            response = await asyncio.to_thread(
+                table.query,
+                IndexName='store_id-created_at-index',
+                KeyConditionExpression='store_id = :store_id',
+                ExpressionAttributeValues={
+                    ':store_id': store_id
+                },
+                ScanIndexForward=False,  # Most recent first
+                Limit=limit + offset  # Fetch extra for offset
+            )
+
+            # Apply offset
+            items = response.get('Items', [])[offset:offset + limit]
+
+            orders = []
+            for item in items:
+                # NOTE: Field is stored as 'id' not 'order_id' in DynamoDB
+                order_data = OrderData(
+                    order_id=item.get('id', item.get('order_id', '')),  # Handle both field names
+                    customer_phone=item.get('customer_phone', ''),
+                    customer_id=item.get('customer_id'),
+                    store_id=item.get('store_id', ''),
+                    items=item.get('items', []),
+                    total_amount=item.get('total_amount', 0),
+                    status=item.get('status', 'pending'),
+                    channel=item.get('channel', 'unknown'),
+                    language=item.get('language', 'en'),
+                    intent=item.get('intent', ''),
+                    confidence=item.get('confidence', 0),
+                    entities=item.get('entities', []),
+                    created_at=item.get('created_at', ''),
+                    updated_at=item.get('updated_at', ''),
+                    payment_method=item.get('payment_method'),
+                    delivery_address=item.get('delivery_address'),
+                    customer_name=item.get('customer_name'),
+                    delivery_notes=item.get('delivery_notes'),
+                    order_number=item.get('order_number'),
+                    tracking_id=item.get('tracking_id')
+                )
+                orders.append(order_data)
+
+            return HybridOrderResult(
+                success=True,
+                data=orders,
+                processing_time_ms=(time.time() - start_time) * 1000,
+                source="dynamodb"
+            )
+
+        except ClientError as e:
+            logger.error(f"DynamoDB error getting store orders: {e}")
+            return HybridOrderResult(
+                success=False,
+                error=str(e),
+                processing_time_ms=(time.time() - start_time) * 1000,
+                source="dynamodb"
+            )
+
+    async def get_orders_by_customer(self, customer_id: str, limit: int = 50) -> HybridOrderResult:
+        """Get orders for a customer from DynamoDB"""
+        start_time = time.time()
+
+        if not self.dynamodb:
+            return HybridOrderResult(
+                success=False,
+                error="DynamoDB not initialized",
+                processing_time_ms=(time.time() - start_time) * 1000,
+                source="dynamodb"
+            )
+
+        try:
+            table = self.dynamodb.Table(self.table_names['orders'])
+
+            # Scan with filter on customer_id
+            # Note: For production, create a GSI on customer_id for better performance
+            response = await asyncio.to_thread(
+                table.scan,
+                FilterExpression='customer_id = :customer_id',
+                ExpressionAttributeValues={
+                    ':customer_id': customer_id
+                },
+                Limit=limit * 10  # Scan more to account for filtering
+            )
+
+            items = response.get('Items', [])[:limit]
+
+            # Sort by created_at descending
+            items.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+
+            orders = []
+            for item in items:
+                # NOTE: Field is stored as 'id' not 'order_id' in DynamoDB
+                order_data = OrderData(
+                    order_id=item.get('id', item.get('order_id', '')),  # Handle both field names
+                    customer_phone=item.get('customer_phone', ''),
+                    customer_id=item.get('customer_id'),
+                    store_id=item.get('store_id', ''),
+                    items=item.get('items', []),
+                    total_amount=item.get('total_amount', 0),
+                    status=item.get('status', 'pending'),
+                    channel=item.get('channel', 'unknown'),
+                    language=item.get('language', 'en'),
+                    intent=item.get('intent', ''),
+                    confidence=item.get('confidence', 0),
+                    entities=item.get('entities', []),
+                    created_at=item.get('created_at', ''),
+                    updated_at=item.get('updated_at', ''),
+                    payment_method=item.get('payment_method'),
+                    delivery_address=item.get('delivery_address'),
+                    customer_name=item.get('customer_name'),
+                    delivery_notes=item.get('delivery_notes'),
+                    order_number=item.get('order_number'),
+                    tracking_id=item.get('tracking_id')
                 )
                 orders.append(order_data)
 

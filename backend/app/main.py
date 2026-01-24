@@ -16,6 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.openapi.utils import get_openapi
+from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 # Local imports
@@ -25,6 +26,8 @@ from app.middleware.rate_limit import initialize_redis, close_redis, rate_limit_
 # NOTE: unified_order_service removed after AI archival
 # from app.services.unified_order_service import unified_order_service
 from app.core.exceptions import vyaparai_exception_handler, VyaparAIException
+from app.core.security import validate_security_config
+from app.core.audit import log_audit_event, AuditEventType, AuditSeverity
 
 # Configure logging
 logging.basicConfig(
@@ -39,6 +42,244 @@ DEBUG = ENVIRONMENT == "development"
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
+
+# =============================================================================
+# SECURITY CONFIGURATION
+# =============================================================================
+
+# Maximum request body size (10MB default, can be adjusted per endpoint)
+MAX_REQUEST_SIZE_BYTES = int(os.getenv("MAX_REQUEST_SIZE_BYTES", 10 * 1024 * 1024))
+
+# Content types allowed for POST/PUT/PATCH requests
+ALLOWED_CONTENT_TYPES = [
+    "application/json",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+]
+
+# Paths that don't require content-type validation
+CONTENT_TYPE_EXEMPT_PATHS = [
+    "/health",
+    "/health/detailed",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/",
+    "/api",
+]
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to add security headers to all responses.
+    Implements OWASP security best practices.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Prevent MIME type sniffing
+        response.headers["X-Content-Type-Options"] = "nosniff"
+
+        # Prevent clickjacking
+        response.headers["X-Frame-Options"] = "DENY"
+
+        # XSS Protection (legacy but still useful for older browsers)
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+
+        # Referrer Policy - don't leak referrer info
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+        # Permissions Policy - restrict browser features
+        response.headers["Permissions-Policy"] = (
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+            "magnetometer=(), microphone=(), payment=(), usb=()"
+        )
+
+        # Content Security Policy (relaxed for API, stricter for HTML responses)
+        if "text/html" in response.headers.get("content-type", ""):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "img-src 'self' data: https:; "
+                "font-src 'self' https://fonts.gstatic.com; "
+                "connect-src 'self' https://api.vyaparai.com"
+            )
+
+        # HSTS - enforce HTTPS (only in production)
+        if not DEBUG:
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains; preload"
+            )
+
+        # Cache control for API responses
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+
+        return response
+
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to enforce request body size limits.
+    Prevents denial of service via large request bodies.
+    """
+
+    def __init__(self, app, max_size: int = MAX_REQUEST_SIZE_BYTES):
+        super().__init__(app)
+        self.max_size = max_size
+
+    async def dispatch(self, request: Request, call_next):
+        # Check Content-Length header
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_size:
+                    return JSONResponse(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content={
+                            "error": True,
+                            "message": f"Request body too large. Maximum size is {self.max_size // (1024 * 1024)}MB",
+                            "status_code": 413
+                        }
+                    )
+            except ValueError:
+                pass  # Invalid content-length, let it through for now
+
+        return await call_next(request)
+
+
+class ContentTypeValidationMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to validate Content-Type headers for POST/PUT/PATCH requests.
+    Prevents processing of unexpected content types.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Only check for methods that have request bodies
+        if request.method in ["POST", "PUT", "PATCH"]:
+            # Skip exempt paths
+            if not any(request.url.path.startswith(path) for path in CONTENT_TYPE_EXEMPT_PATHS):
+                content_type = request.headers.get("content-type", "")
+
+                # Extract base content type (ignore parameters like charset)
+                base_content_type = content_type.split(";")[0].strip().lower()
+
+                if base_content_type and base_content_type not in ALLOWED_CONTENT_TYPES:
+                    logger.warning(
+                        f"Invalid content-type '{content_type}' for {request.method} {request.url.path}"
+                    )
+                    return JSONResponse(
+                        status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                        content={
+                            "error": True,
+                            "message": f"Unsupported content type: {base_content_type}",
+                            "allowed_types": ALLOWED_CONTENT_TYPES,
+                            "status_code": 415
+                        }
+                    )
+
+        return await call_next(request)
+
+
+class APIRequestAuditMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware for auditing API requests.
+    Logs all non-exempt requests with timing and status information.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip audit for exempt paths
+        if any(request.url.path.startswith(path) for path in CONTENT_TYPE_EXEMPT_PATHS):
+            return await call_next(request)
+
+        start_time = time.time()
+        request_id = getattr(request.state, "request_id", f"req_{int(start_time * 1000)}")
+
+        # Extract identifiers for audit
+        store_id = request.headers.get("x-store-id")
+        client_ip = request.client.host if request.client else "unknown"
+
+        response = None
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            # Log audit event
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Determine severity based on status code
+            if response:
+                if response.status_code >= 500:
+                    severity = AuditSeverity.ERROR
+                elif response.status_code >= 400:
+                    severity = AuditSeverity.WARNING
+                else:
+                    severity = AuditSeverity.INFO
+                status_code = response.status_code
+                success = response.status_code < 400
+            else:
+                severity = AuditSeverity.ERROR
+                status_code = 500
+                success = False
+
+            # Only log detailed audit for non-GET requests or errors
+            if request.method != "GET" or not success:
+                log_audit_event(
+                    event_type=AuditEventType.DATA_READ if request.method == "GET" else AuditEventType.DATA_UPDATE,
+                    severity=severity,
+                    store_id=store_id,
+                    resource_type="api",
+                    resource_id=request.url.path,
+                    action=request.method.lower(),
+                    details={
+                        "request_id": request_id,
+                        "status_code": status_code,
+                        "duration_ms": round(duration_ms, 2),
+                        "client_ip": client_ip if DEBUG else client_ip.rsplit(".", 1)[0] + ".*",
+                    },
+                    request=request,
+                    success=success
+                )
+
+
+class RequestTimeoutMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to enforce request timeouts.
+    Prevents long-running requests from tying up resources.
+    """
+
+    def __init__(self, app, timeout_seconds: float = 30.0):
+        super().__init__(app)
+        self.timeout_seconds = timeout_seconds
+
+    async def dispatch(self, request: Request, call_next):
+        import asyncio
+
+        # Skip timeout for certain paths (like file uploads)
+        if any(path in request.url.path for path in ["/upload", "/webhook", "/stream"]):
+            return await call_next(request)
+
+        try:
+            return await asyncio.wait_for(
+                call_next(request),
+                timeout=self.timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Request timeout after {self.timeout_seconds}s: {request.method} {request.url.path}"
+            )
+            return JSONResponse(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                content={
+                    "error": True,
+                    "message": "Request timed out. Please try again.",
+                    "status_code": 504,
+                    "timeout_seconds": self.timeout_seconds
+                }
+            )
 
 # Application metadata
 APP_TITLE = "VyaparAI Order Processing API"
@@ -92,6 +333,21 @@ APP_VERSION = "1.0.0"
 # Global state for application lifecycle
 app_state: Dict[str, Any] = {}
 
+def _print_startup_banner():
+    """Print startup banner with configuration summary"""
+    banner = f"""
+╔══════════════════════════════════════════════════════════════════╗
+║                    VyaparAI API Server                           ║
+║                    Version: {APP_VERSION}                                   ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Environment: {ENVIRONMENT:<20}                               ║
+║  Debug Mode:  {str(DEBUG):<20}                               ║
+║  Docs:        {str(DOCS_ENABLED):<20}                               ║
+╚══════════════════════════════════════════════════════════════════╝
+"""
+    print(banner)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -99,24 +355,80 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events
     """
     # Startup
+    _print_startup_banner()
     logger.info("Starting VyaparAI application...")
-    
+
     try:
+        # Validate security configuration FIRST - will raise in production if misconfigured
+        # This MUST succeed before starting the application
+        logger.info("[1/5] Validating security configuration...")
+        security_status = validate_security_config()
+        if security_status["valid"]:
+            logger.info(f"  ✓ Security validated ({security_status['environment']} mode)")
+        else:
+            # In development, log warnings but continue
+            for warning in security_status.get("warnings", []):
+                logger.warning(f"  ⚠ Security warning: {warning}")
+
         # Initialize Redis for rate limiting
+        logger.info("[2/5] Initializing Redis connection...")
         await initialize_redis(REDIS_URL)
-        logger.info("Redis initialized for rate limiting")
-        
+        logger.info("  ✓ Redis initialized for rate limiting")
+
+        # Initialize and VERIFY database connections
+        logger.info("[3/5] Verifying database connections...")
+        from app.core.database import db_manager
+
+        # Determine if we should fail on DB errors (production = yes, dev = no)
+        is_production = ENVIRONMENT.lower() == "production"
+        db_verification = await db_manager.verify_connections_at_startup(
+            fail_on_error=is_production
+        )
+
+        # Log verification results
+        if db_verification["dynamodb"]["verified"]:
+            logger.info("  ✓ DynamoDB connection verified")
+        elif db_verification["dynamodb"]["status"] == "not_initialized":
+            if is_production:
+                raise RuntimeError("DynamoDB not initialized - required for production")
+            logger.warning("  ⚠ DynamoDB not configured (development mode)")
+        else:
+            logger.error(f"  ✗ DynamoDB verification failed: {db_verification['dynamodb'].get('error')}")
+
+        if db_verification["postgres"]["verified"]:
+            logger.info(f"  ✓ PostgreSQL pool verified (size: {db_verification['postgres'].get('pool_size', 'N/A')})")
+        elif db_verification["postgres"]["status"] == "not_configured":
+            logger.info("  ℹ PostgreSQL not configured (optional)")
+
+        if db_verification["redis"]["verified"]:
+            logger.info("  ✓ Redis connection verified")
+        elif db_verification["redis"]["status"] == "not_configured":
+            logger.info("  ℹ Redis not configured (using in-app rate limiting)")
+
         # Warm up NLP models
-        logger.info("Warming up NLP models...")
-        await asyncio.sleep(1)  # Simulate model loading
-        logger.info("NLP models ready")
-        
+        logger.info("[4/5] Loading NLP models...")
+        await asyncio.sleep(0.5)  # Brief warmup
+        logger.info("  ✓ NLP models ready")
+
         # Initialize services
+        logger.info("[5/5] Finalizing startup...")
         app_state["startup_time"] = time.time()
         app_state["services_ready"] = True
-        
+
+        logger.info("═" * 60)
         logger.info("VyaparAI application started successfully")
-        
+        logger.info(f"API available at: http://0.0.0.0:8000")
+        if DOCS_ENABLED:
+            logger.info(f"Documentation at: http://0.0.0.0:8000/docs")
+        logger.info("═" * 60)
+
+    except ValueError as e:
+        # Security configuration errors - CRITICAL, must not start
+        logger.critical(f"SECURITY CONFIGURATION ERROR: {e}")
+        logger.critical("Application cannot start with invalid security configuration")
+        app_state["services_ready"] = False
+        raise  # Re-raise to prevent app from starting
+
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
         app_state["services_ready"] = False
@@ -152,25 +464,59 @@ app = FastAPI(
 # MIDDLEWARE CONFIGURATION
 # =============================================================================
 
+# Security headers middleware (must be first to ensure all responses get headers)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Request size limit middleware
+app.add_middleware(RequestSizeLimitMiddleware, max_size=MAX_REQUEST_SIZE_BYTES)
+
+# Content-Type validation middleware
+app.add_middleware(ContentTypeValidationMiddleware)
+
+# API request audit middleware (logs all API requests)
+app.add_middleware(APIRequestAuditMiddleware)
+
+# Request timeout middleware (30 second default)
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
+app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+
 # Compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# CORS middleware
+# CORS middleware - NEVER use wildcard "*" with credentials
+# Even in debug mode, use explicit list of allowed origins
+CORS_ORIGINS = [
+    "https://vyapaarai.com",         # Primary domain
+    "https://www.vyapaarai.com",     # WWW subdomain
+    "https://app.vyapaarai.com",     # App subdomain
+    "https://vyaparai.com",          # Alternate spelling
+    "https://www.vyaparai.com",      # Alternate spelling WWW
+    "https://app.vyaparai.com",      # Alternate spelling app
+    "https://admin.vyaparai.com",
+    # CloudFront distributions
+    "https://de98fon4psh1n.cloudfront.net",  # Store dashboard CloudFront
+    "https://d2zz8aoffj79ma.cloudfront.net", # Secondary CloudFront
+    "https://duunvuia0g11s.cloudfront.net",  # Tertiary CloudFront
+]
+
+# Add development origins only in debug mode
+if DEBUG:
+    CORS_ORIGINS.extend([
+        "http://localhost:3000",         # Frontend development
+        "https://localhost:3000",        # Frontend development with HTTPS
+        "http://localhost:5173",         # Vite dev server
+        "https://localhost:5173",        # Vite dev server with HTTPS
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if DEBUG else [
-        "https://vyaparai.com",
-        "https://app.vyaparai.com",
-        "https://admin.vyaparai.com",
-        "http://localhost:3000",  # Frontend development
-        "https://localhost:3000",  # Frontend development with HTTPS
-        "http://localhost:5173",   # Vite dev server
-        "https://localhost:5173"   # Vite dev server with HTTPS
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Store-ID", "X-Session-ID"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining"]
 )
 
 # Trusted host middleware (for production)
@@ -178,22 +524,35 @@ if not DEBUG:
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=[
-            "vyaparai.com",
+            "api.vyapaarai.com",               # API subdomain (primary)
+            "www.vyapaarai.com",               # Custom domain (primary)
+            "vyapaarai.com",                   # Apex domain
+            "app.vyapaarai.com",               # App subdomain
+            "www.vyaparai.com",                # Alternate spelling
+            "vyaparai.com",                    # Alternate spelling apex
             "app.vyaparai.com",
             "admin.vyaparai.com",
-            "api.vyaparai.com"
+            "api.vyaparai.com",
+            "jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com",  # Original API Gateway
+            "d-h1w8nolafe.execute-api.ap-south-1.amazonaws.com",  # Custom domain API Gateway mapping (old)
+            "d-xkxntytije.execute-api.ap-south-1.amazonaws.com",  # Custom domain API Gateway mapping (new)
+            "bk6kziyr5h.execute-api.ap-south-1.amazonaws.com",  # Current API Gateway endpoint
+            "rroisuiv7c.execute-api.ap-south-1.amazonaws.com",  # Production API Gateway endpoint
+            "6ais2a7oafg5qt5xilobjpijsa0cquje.lambda-url.ap-south-1.on.aws",  # Lambda Function URL
         ]
     )
 
-# Request ID middleware
+# Request ID and API version middleware
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
-    """Add request ID to all requests"""
+    """Add request ID and API version headers to all requests"""
     request_id = f"req_{int(time.time() * 1000)}_{id(request)}"
     request.state.request_id = request_id
-    
+
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-API-Version"] = APP_VERSION
+    response.headers["X-Environment"] = ENVIRONMENT if DEBUG else "production"
     return response
 
 # Response time middleware
@@ -216,9 +575,19 @@ async def rate_limit_middleware_wrapper(request: Request, call_next):
 # CUSTOM DOCUMENTATION
 # =============================================================================
 
+# API documentation can be disabled in production via environment variable
+DOCS_ENABLED = os.getenv("DOCS_ENABLED", "true").lower() == "true" or DEBUG
+
+
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
     """Custom Swagger UI with VyaparAI branding"""
+    if not DOCS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API documentation is disabled in this environment"
+        )
+
     return get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=f"{app.title} - API Documentation",
@@ -233,15 +602,33 @@ async def custom_swagger_ui_html():
         }
     )
 
+
 @app.get("/redoc", include_in_schema=False)
 async def custom_redoc_html():
     """Custom ReDoc with VyaparAI branding"""
+    if not DOCS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API documentation is disabled in this environment"
+        )
+
     return get_redoc_html(
         openapi_url=app.openapi_url,
         title=f"{app.title} - API Documentation",
         redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2.1.3/bundles/redoc.standalone.js",
         redoc_favicon_url="https://vyaparai.com/favicon.ico",
     )
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi_json():
+    """OpenAPI schema endpoint"""
+    if not DOCS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API documentation is disabled in this environment"
+        )
+    return app.openapi()
 
 def custom_openapi():
     """Custom OpenAPI schema with VyaparAI branding"""
@@ -332,7 +719,7 @@ async def detailed_health_check():
 
     # Check Redis
     try:
-        from middleware.rate_limit import redis_client
+        from app.middleware.rate_limit import redis_client
         if redis_client:
             await redis_client.ping()
             health_status["services"]["redis"] = {"status": "healthy"}
@@ -483,17 +870,43 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle general exceptions"""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    """
+    Handle general exceptions securely.
+    Never expose internal error details in production.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+
+    # Log the full error with stack trace for debugging
+    logger.error(
+        f"Unhandled exception [request_id={request_id}]: {exc}",
+        exc_info=True,
+        extra={
+            "request_id": request_id,
+            "path": request.url.path,
+            "method": request.method,
+            "client_ip": request.client.host if request.client else "unknown"
+        }
+    )
+
+    # Build secure response - never expose internal details in production
+    error_response = {
+        "error": True,
+        "message": "An internal error occurred. Please try again later.",
+        "status_code": 500,
+        "request_id": request_id,
+        "timestamp": time.time()
+    }
+
+    # Only add error details in development mode
+    if DEBUG:
+        error_response["debug"] = {
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc)
+        }
+
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "error": True,
-            "message": "Internal server error",
-            "status_code": 500,
-            "request_id": getattr(request.state, "request_id", "unknown"),
-            "timestamp": time.time()
-        }
+        content=error_response
     )
 
 # =============================================================================
@@ -533,27 +946,48 @@ except ImportError as e:
 # DEVELOPMENT UTILITIES
 # =============================================================================
 
+# Debug endpoints are ONLY available in development mode
+# This check happens at startup, not per-request, for security
 if DEBUG:
-    @app.get("/debug/info", tags=["debug"])
-    async def debug_info():
-        """Debug information endpoint (development only)"""
+    @app.get("/debug/info", tags=["debug"], include_in_schema=False)
+    async def debug_info(request: Request):
+        """
+        Debug information endpoint (development only).
+
+        This endpoint is only available when ENVIRONMENT=development.
+        It is excluded from OpenAPI schema for additional security.
+        """
+        # Log access to debug endpoint
+        logger.info(f"Debug endpoint accessed from {request.client.host if request.client else 'unknown'}")
+
         return {
-            "app_state": app_state,
-            "environment_variables": {
+            "warning": "DEBUG MODE - Not for production use",
+            "app_state": {
+                "startup_time": app_state.get("startup_time"),
+                "services_ready": app_state.get("services_ready"),
+            },
+            "environment": {
                 "ENVIRONMENT": ENVIRONMENT,
                 "DEBUG": DEBUG,
-                "REDIS_URL": REDIS_URL,
-                "GOOGLE_API_KEY": "***" if GOOGLE_API_KEY else None,
-                "GOOGLE_TRANSLATE_API_KEY": "***" if GOOGLE_TRANSLATE_API_KEY else None
+                "REQUEST_TIMEOUT": REQUEST_TIMEOUT_SECONDS,
+                "MAX_REQUEST_SIZE_MB": MAX_REQUEST_SIZE_BYTES // (1024 * 1024),
+            },
+            "configured_services": {
+                "redis": bool(REDIS_URL),
+                "google_api": bool(GOOGLE_API_KEY),
+                "google_translate": bool(GOOGLE_TRANSLATE_API_KEY),
             }
-            # NOTE: unified_order_service metrics removed after AI archival
-            # "services": {
-            #     "unified_order_service": {
-            #         "metrics": unified_order_service.get_metrics(),
-            #         "performance": unified_order_service.get_performance_summary()
-            #     }
-            # }
+            # Sensitive values are never exposed, even in debug mode
         }
+else:
+    # In production, explicitly reject debug endpoint requests
+    @app.get("/debug/info", include_in_schema=False)
+    async def debug_info_disabled():
+        """Debug endpoint disabled in production"""
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found"
+        )
 
 # =============================================================================
 # APPLICATION STARTUP

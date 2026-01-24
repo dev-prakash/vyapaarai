@@ -1,0 +1,307 @@
+# VyapaarAI Troubleshooting Guide
+
+## Common Issues and Solutions
+
+### Customer Login - TypeError: Cannot read properties of undefined (reading 'length')
+
+**Issue Date:** December 2, 2025
+**Status:** RESOLVED
+**Severity:** Critical
+
+#### Problem Description
+
+When customers log in and are redirected to `/customer/stores`, the application crashes with:
+```
+TypeError: Cannot read properties of undefined (reading 'length')
+```
+
+#### Root Cause
+
+The `StoreSelector` component in `frontend-pwa/src/pages/customer/StoreSelector.tsx` was accessing `nearbyStores.length` and using array methods like `.filter()` without defensive null checking. In certain scenarios (e.g., slow network, race conditions), the `nearbyStores` from `useStore()` context could be `undefined` instead of an empty array `[]`.
+
+#### Solution Implemented
+
+Added defensive null checking at all locations where `nearbyStores` is accessed:
+
+**File:** `frontend-pwa/src/pages/customer/StoreSelector.tsx`
+
+1. **Line 213** - Filter stores safely:
+```typescript
+// Before:
+const filteredStores = nearbyStores.filter((store) => ...)
+
+// After:
+const filteredStores = (nearbyStores || []).filter((store) => ...)
+```
+
+2. **Line 241** - Display store count safely:
+```typescript
+// Before:
+{nearbyStores.length} stores nearby
+
+// After:
+{nearbyStores?.length ?? 0} stores nearby
+```
+
+3. **Line 575** - Conditional rendering:
+```typescript
+// Before:
+{hasSearched && nearbyStores.length > 0 && (
+
+// After:
+{hasSearched && (nearbyStores?.length ?? 0) > 0 && (
+```
+
+4. **Lines 594, 605** - Filter operations:
+```typescript
+// Before:
+{nearbyStores.filter((s) => s.isOpen).length}
+{nearbyStores.filter((s) => s.rating && s.rating >= 4).length}
+
+// After:
+{(nearbyStores || []).filter((s) => s.isOpen).length}
+{(nearbyStores || []).filter((s) => s.rating && s.rating >= 4).length}
+```
+
+#### Verification Steps
+
+After deployment, verify the fix:
+
+1. Open browser console (F12)
+2. Navigate to https://www.vyapaarai.com
+3. Check build tag: `window.VyapaarAI_BUILD_TAG`
+4. Expected value: `STORE_NULL_FIX_BUILD_2025-12-02T22:20:00Z_FORCE_REFRESH`
+
+#### If Issue Persists - Browser Cache Clearing
+
+If you still see the error after deployment, clear browser cache:
+
+**Chrome/Edge:**
+1. Press `Ctrl+Shift+Delete` (Windows) or `Cmd+Shift+Delete` (Mac)
+2. Select "Cached images and files"
+3. Click "Clear data"
+4. **Hard refresh:** `Ctrl+Shift+R` (Windows) or `Cmd+Shift+R` (Mac)
+
+**Firefox:**
+1. Press `Ctrl+Shift+Delete` (Windows) or `Cmd+Shift+Delete` (Mac)
+2. Select "Cache"
+3. Click "Clear Now"
+4. **Hard refresh:** `Ctrl+F5` (Windows) or `Cmd+Shift+R` (Mac)
+
+**Safari:**
+1. `Safari > Preferences > Advanced`
+2. Enable "Show Develop menu in menu bar"
+3. `Develop > Empty Caches`
+4. **Hard refresh:** `Cmd+Option+R`
+
+**Mobile (iOS):**
+1. Settings > Safari > Clear History and Website Data
+2. Restart browser
+
+**Mobile (Android Chrome):**
+1. Settings > Privacy > Clear browsing data
+2. Select "Cached images and files"
+3. Restart browser
+
+#### Service Worker Issues
+
+The application uses a service worker for offline functionality. If cache clearing doesn't work:
+
+1. Open DevTools (F12)
+2. Go to "Application" tab (Chrome) or "Storage" tab (Firefox)
+3. Click "Service Workers" (Chrome) or "Service Workers" under "Application" (Firefox)
+4. Click "Unregister" for all VyapaarAI service workers
+5. Go to "Cache Storage"
+6. Delete all caches starting with "workbox-"
+7. Hard refresh the page
+
+---
+
+## Deployment Checklist
+
+When deploying frontend fixes:
+
+1. ✅ **Update Build Tag** in `frontend-pwa/src/App.tsx`
+   ```typescript
+   const BUILD_TAG = 'DESCRIPTIVE_NAME_BUILD_YYYY-MM-DDTHH:MM:SSZ'
+   ```
+
+2. ✅ **Build Frontend**
+   ```bash
+   cd frontend-pwa
+   npm run build
+   ```
+
+3. ✅ **Deploy to S3**
+   ```bash
+   # Deploy assets with long cache
+   aws s3 sync dist/ s3://www.vyapaarai.com/ --delete \
+     --cache-control "public, max-age=31536000, immutable" \
+     --exclude "index.html" --exclude "sw.js" \
+     --exclude "manifest.webmanifest" --exclude "registerSW.js"
+
+   # Deploy HTML/SW with no cache
+   aws s3 cp dist/index.html s3://www.vyapaarai.com/index.html \
+     --cache-control "public, max-age=0, must-revalidate"
+   aws s3 cp dist/sw.js s3://www.vyapaarai.com/sw.js \
+     --cache-control "public, max-age=0, must-revalidate"
+   aws s3 cp dist/manifest.webmanifest s3://www.vyapaarai.com/manifest.webmanifest \
+     --cache-control "public, max-age=0, must-revalidate"
+   aws s3 cp dist/registerSW.js s3://www.vyapaarai.com/registerSW.js \
+     --cache-control "public, max-age=0, must-revalidate"
+   ```
+
+4. ✅ **Invalidate CloudFront Cache**
+   ```bash
+   aws cloudfront create-invalidation --distribution-id E1UY93SVXV8QOF --paths "/*"
+   ```
+
+5. ✅ **Verify Deployment**
+   ```bash
+   # Check invalidation status
+   aws cloudfront get-invalidation --distribution-id E1UY93SVXV8QOF --id <INVALIDATION_ID>
+   ```
+
+6. ✅ **Test in Browser**
+   - Open https://www.vyapaarai.com
+   - Check build tag in console
+   - Test affected functionality
+
+---
+
+## Context Provider Issues
+
+### StoreContext Not Available
+
+**Error:**
+```
+Error: useStore must be used within a StoreProvider
+```
+
+**Solution:**
+Ensure `StoreProvider` is wrapping your component in the provider hierarchy.
+
+**Provider Hierarchy:** (defined in `frontend-pwa/src/providers/AppProviders.tsx` and `frontend-pwa/src/contexts/index.tsx`)
+```
+<AppProviders>          // Main app providers
+  <StoreProvider>       // Store context (included in contexts/index.tsx AppProvider)
+    <OrderProvider>     // Order context
+      <YourComponent />
+    </OrderProvider>
+  </StoreProvider>
+</AppProviders>
+```
+
+**Verification:**
+Check `frontend-pwa/src/main.tsx`:
+```typescript
+<AppProviders>
+  <App />
+</AppProviders>
+```
+
+And `frontend-pwa/src/providers/AppProviders.tsx`:
+```typescript
+import { AppProvider as EcommerceContextProvider } from '../contexts'
+// ...
+<EcommerceContextProvider>
+  {children}
+</EcommerceContextProvider>
+```
+
+---
+
+## API and Backend Issues
+
+### Market Prices API Not Loading
+
+**Issue:** Market prices showing "Market prices unavailable"
+
+**Common Causes:**
+1. Lambda function not deployed with correct dependencies
+2. data.gov.in API is down or slow
+3. Missing environment variables
+
+**Solution:**
+
+1. **Check Lambda has httpx dependency:**
+   ```bash
+   cd backend
+   grep httpx requirements.txt
+   # Should show: httpx>=0.25.0
+   ```
+
+2. **Verify Lambda environment variables:**
+   ```bash
+   aws lambda get-function-configuration --function-name vyaparai-backend-prod \
+     --query 'Environment.Variables' --output json
+   ```
+   Should include:
+   ```json
+   {
+     "DATA_GOV_API_KEY": "...",
+     "DYNAMODB_TABLE_NAME": "market_prices_cache"
+   }
+   ```
+
+3. **Test API directly:**
+   ```bash
+   curl "https://api.vyaparai.com/api/v1/public/market-prices?commodities=Tomato,Onion"
+   ```
+
+4. **Check Lambda logs:**
+   ```bash
+   aws logs tail /aws/lambda/vyaparai-backend-prod --follow
+   ```
+
+---
+
+## Build and Deployment Issues
+
+### Large Bundle Size Warning
+
+**Warning:**
+```
+(!) Some chunks are larger than 1000 kB after minification.
+```
+
+**Status:** Known issue, not critical
+
+**Future Optimization:**
+- Implement code splitting with dynamic imports
+- Use `build.rollupOptions.output.manualChunks`
+- Consider lazy loading heavy components
+
+### Service Worker Not Updating
+
+**Issue:** Changes not reflected after deployment
+
+**Solution:**
+1. Increment version in `frontend-pwa/vite.config.ts` (if using workbox plugin versioning)
+2. Clear service worker in DevTools
+3. Main.tsx already includes auto-cleanup:
+```typescript
+// Force cache refresh for this deployment
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(registrations => {
+    registrations.forEach(registration => {
+      registration.unregister()
+    })
+  })
+}
+```
+
+---
+
+## Contact and Support
+
+For issues not covered here:
+1. Check application logs in browser console
+2. Check backend Lambda logs: `aws logs tail /aws/lambda/vyaparai-backend-prod`
+3. Review recent deployments and changes
+4. Contact development team
+
+---
+
+**Last Updated:** December 2, 2025
+**Document Version:** 1.0

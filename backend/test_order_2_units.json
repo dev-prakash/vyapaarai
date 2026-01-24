@@ -1,0 +1,16 @@
+{
+  "store_id": "STORE-01K8NJ40V9KFKX2Y2FMK466WFH",
+  "customer_phone": "9876543210",
+  "customer_name": "Test Customer",
+  "delivery_address": "123 Test Street, Mumbai, Maharashtra 400001",
+  "items": [
+    {
+      "product_id": "GP1759847855933",
+      "product_name": "Maggi 2-Minute Noodles Masala",
+      "quantity": 2,
+      "unit": "pieces",
+      "unit_price": 14
+    }
+  ],
+  "payment_method": "cod"
+}

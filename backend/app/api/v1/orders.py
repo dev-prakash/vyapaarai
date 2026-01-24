@@ -1,6 +1,11 @@
 """
 FastAPI REST endpoints for VyaparAI Order Processing Service
 Provides comprehensive API for order processing across all channels and languages
+
+Authentication:
+- Store management endpoints require store_owner authentication
+- Customer order history requires customer authentication
+- Webhook endpoints are unauthenticated (verified by signature)
 """
 
 import uuid
@@ -15,15 +20,21 @@ import asyncio
 from decimal import Decimal
 
 # Local imports
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-from middleware.rate_limit import rate_limit_dependency
+from app.middleware.rate_limit import rate_limit_dependency
 from app.services.payment_service import PaymentService
 from app.services.inventory_service import inventory_service
+from app.services.unified_order_service import unified_order_service, OrderProcessingResult
+from app.services.order_transaction_service import (
+    OrderTransactionService, OrderItem, OrderTransactionResult,
+    get_order_transaction_service
+)
+from app.services.notification_service import notification_service
 from app.models.order import Order, OrderStatus, PaymentStatus, PaymentMethod
 from app.database.hybrid_db import HybridDatabase, OrderData, HybridOrderResult
+from app.core.security import (
+    get_current_user, get_current_store_owner, get_current_customer,
+    get_optional_current_user
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -35,6 +46,35 @@ payment_service = PaymentService()
 # Initialize HybridDatabase for real order storage
 db = HybridDatabase()
 logger.info("HybridDatabase initialized for orders")
+
+# =============================================================================
+# DEPRECATED: In-memory storage for development/fallback
+# WARNING: This storage is NOT suitable for production:
+# - Data is lost on process restart
+# - Does not work with multiple workers/instances
+# - No persistence or reliability guarantees
+#
+# TODO: These should be fully migrated to DynamoDB in production
+# The NLP order processing flow should use the same DynamoDB storage
+# as the checkout flow for consistency.
+# =============================================================================
+orders_db: Dict[str, Dict[str, Any]] = {}  # DEPRECATED - use DynamoDB
+customer_orders: Dict[str, List[str]] = {}  # DEPRECATED - use DynamoDB
+
+# Warning flag to track if deprecated storage is used
+_DEPRECATED_STORAGE_WARNING_SHOWN = False
+
+def _warn_deprecated_storage():
+    """Log warning about deprecated in-memory storage usage"""
+    global _DEPRECATED_STORAGE_WARNING_SHOWN
+    if not _DEPRECATED_STORAGE_WARNING_SHOWN:
+        logger.warning(
+            "DEPRECATION WARNING: Using in-memory storage for orders. "
+            "This is NOT suitable for production. "
+            "Data will be lost on restart and does not work with multiple workers. "
+            "Migrate to DynamoDB for production use."
+        )
+        _DEPRECATED_STORAGE_WARNING_SHOWN = True
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -262,7 +302,11 @@ async def process_order(
         else:
             channel_format = {"text": result.response}
         
-        # Store order in database (in-memory for demo)
+        # Store order in database
+        # NOTE: NLP-processed orders currently use deprecated in-memory storage
+        # TODO: Migrate to DynamoDB for consistency with checkout flow
+        _warn_deprecated_storage()
+
         order_data = {
             "order_id": order_id,
             "status": "processed",
@@ -278,8 +322,8 @@ async def process_order(
             "metadata": request.metadata
         }
         orders_db[order_id] = order_data
-        
-        # Track customer orders
+
+        # Track customer orders (deprecated - use DynamoDB queries instead)
         if request.customer_phone:
             if request.customer_phone not in customer_orders:
                 customer_orders[request.customer_phone] = []
@@ -386,25 +430,35 @@ async def confirm_order(
 from app.core.cache import cache_result, invalidate_orders_cache
 
 @router.get("/history", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
-@cache_result(expiry=300, key_prefix="orders")  # Cache for 5 minutes
+# NOTE: @cache_result decorator removed - was causing 500 errors due to
+# serialization issues with current_user dict dependency. Consider implementing
+# manual caching with explicit cache key (excluding non-serializable params).
 async def get_order_history(
     store_id: str = Query(..., description="Store identifier"),
     start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
     end_date: Optional[str] = Query(None, description="End date (ISO format)"),
-    status: Optional[str] = Query(None, description="Filter by order status"),
+    order_status: Optional[str] = Query(None, description="Filter by order status"),
     payment_method: Optional[str] = Query(None, description="Filter by payment method"),
     search: Optional[str] = Query(None, description="Search in order ID, customer name, or phone"),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(50, ge=1, le=100, description="Items per page"),
     sort_by: str = Query("created_at", description="Sort field"),
-    sort_order: str = Query("desc", description="Sort order (asc/desc)")
+    sort_order: str = Query("desc", description="Sort order (asc/desc)"),
+    current_user: dict = Depends(get_current_store_owner)
 ):
     """
-    Get paginated order history with advanced filtering
-    
+    Get paginated order history with advanced filtering (Store Owner Only)
+
+    Requires authentication with store_owner token.
     Supports filtering by date range, status, payment method, and search terms.
     Returns paginated results with total count.
     """
+    # Verify user has access to the requested store
+    if current_user.get('store_id') and current_user['store_id'] != store_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this store's orders"
+        )
     try:
         # Filter orders by store
         store_orders = {k: v for k, v in orders_db.items() if v.get("store_id") == store_id}
@@ -428,7 +482,7 @@ async def get_order_history(
                     continue
             
             # Status filter
-            if status and order.get("status") != status:
+            if order_status and order.get("status") != order_status:
                 continue
             
             # Payment method filter
@@ -485,7 +539,7 @@ async def get_order_history(
             "filters": {
                 "start_date": start_date,
                 "end_date": end_date,
-                "status": status,
+                "status": order_status,
                 "payment_method": payment_method,
                 "search": search
             }
@@ -503,13 +557,21 @@ async def export_orders(
     store_id: str = Query(..., description="Store identifier"),
     format: str = Query("csv", description="Export format (csv/pdf)"),
     start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
-    end_date: Optional[str] = Query(None, description="End date (ISO format)")
+    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
+    current_user: dict = Depends(get_current_store_owner)
 ):
     """
-    Export orders to CSV or PDF format
-    
+    Export orders to CSV or PDF format (Store Owner Only)
+
+    Requires authentication with store_owner token.
     Supports filtering by date range and exports in the specified format.
     """
+    # Verify user has access to the requested store
+    if current_user.get('store_id') and current_user['store_id'] != store_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this store's orders"
+        )
     try:
         # Get filtered orders (reuse history logic)
         store_orders = {k: v for k, v in orders_db.items() if v.get("store_id") == store_id}
@@ -585,13 +647,21 @@ async def export_orders(
 @router.get("/stats/daily", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def get_daily_stats(
     store_id: str = Query(..., description="Store identifier"),
-    date: Optional[str] = Query(None, description="Date (YYYY-MM-DD format)")
+    date: Optional[str] = Query(None, description="Date (YYYY-MM-DD format)"),
+    current_user: dict = Depends(get_current_store_owner)
 ):
     """
-    Get detailed daily statistics for a store
-    
+    Get detailed daily statistics for a store (Store Owner Only)
+
+    Requires authentication with store_owner token.
     Returns comprehensive metrics including revenue, order counts, and trends.
     """
+    # Verify user has access to the requested store
+    if current_user.get('store_id') and current_user['store_id'] != store_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this store's statistics"
+        )
     try:
         # Use today if no date specified
         if not date:
@@ -724,38 +794,46 @@ async def get_customer_order_history(
 # INDIVIDUAL ORDER ENDPOINTS
 # =============================================================================
 
-@router.get("/{order_id}", response_model=OrderStatusResponse, status_code=status.HTTP_200_OK)
+@router.get("/{order_id}/status", response_model=OrderStatusResponse, status_code=status.HTTP_200_OK)
 async def get_order_status(order_id: str):
     """
-    Get order details and status
-    
+    Get order status summary (lightweight endpoint)
+
     - **order_id**: Order identifier
-    
-    Returns complete order information including status and details.
+
+    Returns order status information. For full details use GET /{order_id}
     """
     try:
-        if order_id not in orders_db:
+        # Get order from DynamoDB
+        db_result = await db.get_order(order_id)
+
+        if not db_result.success:
+            if "not found" in str(db_result.error).lower():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve order: {db_result.error}"
             )
-        
-        order = orders_db[order_id]
-        
+
+        order = db_result.data
+
         return OrderStatusResponse(
-            order_id=order_id,
-            status=order["status"],
-            created_at=order["created_at"],
-            updated_at=order["updated_at"],
-            customer_phone=order.get("customer_phone"),
-            store_id=order.get("store_id"),
-            intent=order["intent"],
-            entities=order["entities"],
-            total_amount=order.get("total_amount"),
-            delivery_address=order.get("delivery_address"),
-            payment_method=order.get("payment_method")
+            order_id=order.order_id,
+            status=order.status,
+            created_at=order.created_at,
+            updated_at=order.updated_at,
+            customer_phone=order.customer_phone,
+            store_id=order.store_id,
+            intent=order.intent or "order",
+            entities={"items": order.items},
+            total_amount=order.total_amount,
+            delivery_address=order.delivery_address,
+            payment_method=order.payment_method
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -769,42 +847,76 @@ async def get_order_status(order_id: str):
 async def cancel_order(
     order_id: str,
     reason: Optional[str] = None,
-    rate_limit: bool = Depends(rate_limit_dependency)
+    rate_limit: bool = Depends(rate_limit_dependency),
+    current_user: dict = Depends(get_current_user)
 ):
     """
-    Cancel an order
-    
+    Cancel an order (Authenticated Users Only)
+
+    Store owners can cancel any order in their store.
+    Customers can only cancel their own orders.
+
     - **order_id**: Order identifier to cancel
     - **reason**: Optional cancellation reason
-    
+
     Returns cancellation confirmation.
     """
     try:
-        if order_id not in orders_db:
+        # Get order from DynamoDB
+        db_result = await db.get_order(order_id)
+
+        if not db_result.success:
+            if "not found" in str(db_result.error).lower():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve order: {db_result.error}"
             )
-        
-        order = orders_db[order_id]
-        
-        # Update order status
-        order.update({
-            "status": "cancelled",
-            "updated_at": datetime.now(),
-            "cancellation_reason": reason
-        })
-        
-        logger.info(f"Order cancelled: {order_id}")
-        
+
+        order = db_result.data
+
+        # Authorization check
+        user_store_id = current_user.get('store_id')
+        user_phone = current_user.get('phone')
+        user_customer_id = current_user.get('customer_id')
+        order_store_id = order.store_id
+        order_customer_phone = order.customer_phone
+
+        # Store owners can cancel orders in their store
+        # Customers can only cancel their own orders
+        is_store_owner = user_store_id and user_store_id == order_store_id
+        is_order_customer = (user_phone and user_phone == order_customer_phone) or \
+                           (user_customer_id and str(user_customer_id) in str(order.customer_id or ''))
+
+        if not is_store_owner and not is_order_customer:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to cancel this order"
+            )
+
+        # Update order status in DynamoDB
+        update_result = await db.update_order_status(order_id, "cancelled")
+
+        if not update_result.success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to cancel order: {update_result.error}"
+            )
+
+        logger.info(f"Order cancelled: {order_id} by user {current_user.get('user_id') or current_user.get('customer_id')}")
+
         return {
             "success": True,
             "order_id": order_id,
             "status": "cancelled",
             "message": "Order cancelled successfully",
-            "cancellation_reason": reason
+            "cancellation_reason": reason,
+            "processing_time_ms": update_result.processing_time_ms
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1055,242 +1167,6 @@ async def get_metrics():
         )
 
 # =============================================================================
-# ORDER HISTORY & ANALYTICS ENDPOINTS
-# =============================================================================
-
-@router.get("/history", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
-async def get_order_history(
-    store_id: str = Query(..., description="Store identifier"),
-    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
-    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
-    status: Optional[str] = Query(None, description="Filter by order status"),
-    payment_method: Optional[str] = Query(None, description="Filter by payment method"),
-    search: Optional[str] = Query(None, description="Search in order ID, customer name, or phone"),
-    page: int = Query(1, ge=1, description="Page number"),
-    limit: int = Query(50, ge=1, le=100, description="Items per page"),
-    sort_by: str = Query("created_at", description="Sort field"),
-    sort_order: str = Query("desc", description="Sort order (asc/desc)")
-):
-    """
-    Get paginated order history with advanced filtering
-    
-    Supports filtering by date range, status, payment method, and search terms.
-    Returns paginated results with total count.
-    """
-    try:
-        # Parse dates
-        start_dt = None
-        end_dt = None
-        if start_date:
-            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        if end_date:
-            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        
-        # Filter orders
-        filtered_orders = []
-        for order in orders_db.values():
-            if order.get('store_id') != store_id:
-                continue
-                
-            # Date filter
-            if start_dt or end_dt:
-                order_dt = datetime.fromisoformat(order.get('created_at', '').replace('Z', '+00:00'))
-                if start_dt and order_dt < start_dt:
-                    continue
-                if end_dt and order_dt > end_dt:
-                    continue
-            
-            # Status filter
-            if status and order.get('status') != status:
-                continue
-                
-            # Payment method filter
-            if payment_method and order.get('paymentMethod') != payment_method:
-                continue
-                
-            # Search filter
-            if search:
-                search_lower = search.lower()
-                order_id = order.get('id', '').lower()
-                customer_name = order.get('customerName', '').lower()
-                customer_phone = order.get('customerPhone', '').lower()
-                
-                if not any(search_lower in field for field in [order_id, customer_name, customer_phone]):
-                    continue
-            
-            filtered_orders.append(order)
-        
-        # Sort orders
-        reverse = sort_order.lower() == 'desc'
-        if sort_by == 'total':
-            filtered_orders.sort(key=lambda x: x.get('total', 0), reverse=reverse)
-        elif sort_by == 'customerName':
-            filtered_orders.sort(key=lambda x: x.get('customerName', ''), reverse=reverse)
-        elif sort_by == 'status':
-            filtered_orders.sort(key=lambda x: x.get('status', ''), reverse=reverse)
-        else:  # created_at
-            filtered_orders.sort(key=lambda x: x.get('created_at', ''), reverse=reverse)
-        
-        # Pagination
-        total = len(filtered_orders)
-        start_idx = (page - 1) * limit
-        end_idx = start_idx + limit
-        paginated_orders = filtered_orders[start_idx:end_idx]
-        
-        logger.info(f"Retrieved {len(paginated_orders)} orders for store {store_id}")
-        
-        return {
-            "success": True,
-            "orders": paginated_orders,
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "total_pages": (total + limit - 1) // limit
-        }
-        
-    except Exception as e:
-        logger.error(f"Error retrieving order history: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve order history: {str(e)}"
-        )
-
-@router.get("/export", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
-async def export_orders(
-    store_id: str = Query(..., description="Store identifier"),
-    format: str = Query("csv", description="Export format (csv/pdf)"),
-    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
-    end_date: Optional[str] = Query(None, description="End date (ISO format)")
-):
-    """
-    Export orders to CSV or PDF format
-    
-    Supports filtering by date range and exports in the specified format.
-    """
-    try:
-        # Parse dates
-        start_dt = None
-        end_dt = None
-        if start_date:
-            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        if end_date:
-            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        
-        # Filter orders
-        filtered_orders = []
-        for order in orders_db.values():
-            if order.get('store_id') != store_id:
-                continue
-                
-            # Date filter
-            if start_dt or end_dt:
-                order_dt = datetime.fromisoformat(order.get('created_at', '').replace('Z', '+00:00'))
-                if start_dt and order_dt < start_dt:
-                    continue
-                if end_dt and order_dt > end_dt:
-                    continue
-            
-            filtered_orders.append(order)
-        
-        if format.lower() == 'csv':
-            # Generate CSV
-            csv_data = "Order ID,Customer Name,Customer Phone,Items,Total,Status,Payment Method,Date\n"
-            for order in filtered_orders:
-                items_count = len(order.get('items', []))
-                csv_data += f"{order.get('id')},{order.get('customerName')},{order.get('customerPhone')},{items_count},{order.get('total')},{order.get('status')},{order.get('paymentMethod')},{order.get('orderDate')}\n"
-            
-            return {
-                "success": True,
-                "data": csv_data,
-                "format": "csv",
-                "filename": f"orders_{store_id}_{datetime.now().strftime('%Y%m%d')}.csv"
-            }
-        elif format.lower() == 'pdf':
-            # Generate PDF (simplified - in production use a proper PDF library)
-            pdf_data = f"VyaparAI Store Orders Report\nStore: {store_id}\nDate: {datetime.now().strftime('%Y-%m-%d')}\n\n"
-            for order in filtered_orders:
-                pdf_data += f"Order: {order.get('id')}\nCustomer: {order.get('customerName')}\nTotal: ₹{order.get('total')}\nStatus: {order.get('status')}\n\n"
-            
-            return {
-                "success": True,
-                "data": pdf_data,
-                "format": "pdf",
-                "filename": f"orders_{store_id}_{datetime.now().strftime('%Y%m%d')}.pdf"
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported format. Use 'csv' or 'pdf'"
-            )
-        
-    except Exception as e:
-        logger.error(f"Error exporting orders: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to export orders: {str(e)}"
-        )
-
-@router.get("/stats/daily", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
-async def get_daily_stats(
-    store_id: str = Query(..., description="Store identifier"),
-    date: Optional[str] = Query(None, description="Date (YYYY-MM-DD format)")
-):
-    """
-    Get detailed daily statistics for a store
-    
-    Returns comprehensive metrics including revenue, order counts, and trends.
-    """
-    try:
-        # Use provided date or today
-        target_date = date or datetime.now().strftime('%Y-%m-%d')
-        start_dt = datetime.strptime(target_date, '%Y-%m-%d')
-        end_dt = start_dt + timedelta(days=1)
-        
-        # Filter orders for the date
-        daily_orders = []
-        total_revenue = 0
-        status_counts = {'pending': 0, 'completed': 0, 'cancelled': 0}
-        payment_counts = {'cash': 0, 'upi': 0, 'card': 0, 'cod': 0}
-        
-        for order in orders_db.values():
-            if order.get('store_id') != store_id:
-                continue
-                
-            order_dt = datetime.fromisoformat(order.get('created_at', '').replace('Z', '+00:00'))
-            if start_dt <= order_dt < end_dt:
-                daily_orders.append(order)
-                total_revenue += order.get('total', 0)
-                status = order.get('status', 'pending')
-                status_counts[status] = status_counts.get(status, 0) + 1
-                payment = order.get('paymentMethod', 'cash')
-                payment_counts[payment] = payment_counts.get(payment, 0) + 1
-        
-        # Calculate additional metrics
-        avg_order_value = total_revenue / len(daily_orders) if daily_orders else 0
-        unique_customers = len(set(order.get('customerPhone') for order in daily_orders))
-        
-        logger.info(f"Retrieved daily stats for store {store_id} on {target_date}")
-        
-        return {
-            "success": True,
-            "date": target_date,
-            "total_orders": len(daily_orders),
-            "total_revenue": total_revenue,
-            "average_order_value": round(avg_order_value, 2),
-            "unique_customers": unique_customers,
-            "status_breakdown": status_counts,
-            "payment_breakdown": payment_counts,
-            "orders": daily_orders
-        }
-        
-    except Exception as e:
-        logger.error(f"Error retrieving daily stats: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve daily stats: {str(e)}"
-        )
-
-# =============================================================================
 # TEST ENDPOINTS (Development Only)
 # =============================================================================
 
@@ -1413,8 +1289,21 @@ async def generate_test_order(request: TestOrderRequest):
         )
 
 @router.post("/")
-async def create_order_with_payment(order_data: CreateOrderRequest):
-    """Create order with payment integration"""
+async def create_order_with_payment(
+    order_data: CreateOrderRequest,
+    current_user: dict = Depends(get_optional_current_user)
+):
+    """
+    Create order with payment integration - TRANSACTIONALLY SAFE
+
+    Uses Saga pattern to ensure:
+    1. Stock is reserved FIRST (atomic deduction)
+    2. Order is created only if stock reservation succeeds
+    3. If order creation fails, stock is automatically restored
+
+    Authentication is optional - allows both authenticated and guest orders.
+    If authenticated, the order is linked to the user's account.
+    """
 
     try:
         # Validate required fields
@@ -1430,49 +1319,19 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
                 content={"error": "Order must contain at least one item"}
             )
 
-        # Check stock availability for all items BEFORE creating order
-        logger.info(f"Checking inventory availability for {len(order_data.items)} items in store {order_data.store_id}")
-
-        for item in order_data.items:
-            availability = await inventory_service.check_availability(
-                store_id=order_data.store_id,
-                product_id=item.product_id,
-                required_quantity=int(item.quantity)
-            )
-
-            if not availability.get('available', False):
-                logger.warning(
-                    f"Insufficient stock for {item.product_id}: "
-                    f"requested={item.quantity}, available={availability.get('current_stock', 0)}"
-                )
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": "Insufficient stock",
-                        "message": f"Cannot fulfill order. {item.product_name or item.product_id} has only {availability.get('current_stock', 0)} units available.",
-                        "product_id": item.product_id,
-                        "product_name": item.product_name,
-                        "requested": item.quantity,
-                        "available": availability.get('current_stock', 0),
-                        "shortage": availability.get('shortage', item.quantity)
-                    }
-                )
-
-        logger.info("Stock availability confirmed for all items")
-
         # Generate order ID
         order_id = f"ORD{uuid.uuid4().hex[:8].upper()}"
-        
+
         # Calculate order totals
         subtotal = sum(item.quantity * item.unit_price for item in order_data.items)
         tax_rate = 0.05  # 5% GST
         tax_amount = subtotal * tax_rate
         delivery_fee = 20 if subtotal < 200 else 0
         total_amount = subtotal + tax_amount + delivery_fee
-        
+
         # Convert items to JSON
         items_json = json.dumps([item.dict() for item in order_data.items])
-        
+
         # Create order object
         order = Order(
             id=order_id,
@@ -1496,11 +1355,11 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
-        
+
         # Handle payment based on method
         payment_required = order_data.payment_method != "cod"
         payment_id = None
-        
+
         if payment_required:
             # Create payment intent for online payments
             payment_result = await payment_service.create_payment_intent(
@@ -1512,13 +1371,13 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
                     "email": order_data.customer_email
                 }
             )
-            
+
             if not payment_result["success"]:
                 raise HTTPException(
-                    status_code=400, 
+                    status_code=400,
                     detail=f"Payment intent creation failed: {payment_result.get('error', 'Unknown error')}"
                 )
-            
+
             payment_id = payment_result["payment_id"]
             order.payment_id = payment_id
             order.payment_created_at = datetime.utcnow()
@@ -1529,19 +1388,29 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
                 order_id=order_id,
                 amount=Decimal(str(total_amount))
             )
-            
+
             if cod_result["success"]:
                 payment_id = cod_result["payment_id"]
                 order.payment_id = payment_id
                 order.payment_created_at = datetime.utcnow()
                 order.payment_gateway_response = json.dumps(cod_result.get("gateway_response", {}))
 
-        # Save order to DynamoDB
-        # Convert items to DynamoDB-compatible format with Decimal types
+        # Prepare order items for transactional service
+        transaction_items = [
+            OrderItem(
+                product_id=item.product_id,
+                product_name=item.product_name,
+                quantity=int(item.quantity),
+                unit_price=Decimal(str(item.unit_price)),
+                unit=item.unit
+            )
+            for item in order_data.items
+        ]
+
+        # Prepare order data for database
         dynamodb_items = []
         for item in order_data.items:
             item_dict = item.dict()
-            # Convert float values to Decimal for DynamoDB
             item_dict['unit_price'] = Decimal(str(item_dict['unit_price']))
             item_dict['quantity'] = int(item_dict['quantity'])
             dynamodb_items.append(item_dict)
@@ -1551,53 +1420,60 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
             customer_phone=order_data.customer_phone,
             store_id=order_data.store_id,
             items=dynamodb_items,
-            total_amount=Decimal(str(total_amount)),  # Convert to Decimal for DynamoDB
+            total_amount=Decimal(str(total_amount)),
             status=OrderStatus.PENDING.value,
             channel=order_data.channel,
             language=order_data.language,
-            intent="checkout",  # Marketplace checkout intent
-            confidence=Decimal("1.0"),  # Convert to Decimal for DynamoDB
-            entities=[],  # No NLP entities for direct checkout
+            intent="checkout",
+            confidence=Decimal("1.0"),
+            entities=[],
             created_at=order.created_at.isoformat(),
             updated_at=order.updated_at.isoformat()
         )
 
-        db_result = await db.create_order(order_data_obj)
+        # ========================================================================
+        # TRANSACTIONAL ORDER CREATION WITH SAGA PATTERN
+        # This ensures: Reserve stock -> Create order -> Rollback on failure
+        # ========================================================================
+        order_transaction_service = get_order_transaction_service()
 
-        if not db_result.success:
-            logger.error(f"Failed to save order to database: {db_result.error}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Order creation failed: {db_result.error}"
-            )
+        transaction_result = await order_transaction_service.create_order_with_stock_reservation(
+            store_id=order_data.store_id,
+            items=transaction_items,
+            order_data=order_data_obj
+        )
 
-        logger.info(f"Order {order_id} saved to DynamoDB in {db_result.processing_time_ms}ms")
+        if not transaction_result.success:
+            # Transaction failed - could be insufficient stock or database error
+            error_code = transaction_result.error_code
 
-        # Reduce inventory for each item AFTER successful order creation
-        logger.info(f"Reducing inventory for order {order_id}")
-
-        for item in order_data.items:
-            stock_update = await inventory_service.update_stock(
-                store_id=order_data.store_id,
-                product_id=item.product_id,
-                quantity_change=-int(item.quantity),  # Negative to reduce stock
-                reason=f"Order {order_id}"
-            )
-
-            if stock_update.get('success'):
-                logger.info(
-                    f"Stock reduced for {item.product_id}: -{item.quantity} units "
-                    f"(was {stock_update.get('previous_stock')}, now {stock_update.get('new_stock')})"
+            if error_code == 'INSUFFICIENT_STOCK':
+                # Return detailed stock error
+                failed_items = transaction_result.failed_items or []
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Insufficient stock",
+                        "message": transaction_result.error,
+                        "failed_items": failed_items,
+                        "order_id": order_id
+                    }
                 )
             else:
-                # Log error but don't fail the order (it's already created)
+                # Other error (database, unexpected)
                 logger.error(
-                    f"Failed to reduce stock for {item.product_id}: "
-                    f"{stock_update.get('error', 'Unknown error')}"
+                    f"Order transaction failed for {order_id}: "
+                    f"{transaction_result.error} (code: {error_code})"
                 )
-                # Note: Order is already created; consider adding to retry queue for manual review
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Order creation failed: {transaction_result.error}"
+                )
 
-        logger.info(f"Inventory update complete for order {order_id}")
+        logger.info(
+            f"Order {order_id} created successfully (transactional) "
+            f"in {transaction_result.processing_time_ms:.2f}ms"
+        )
 
         return {
             "success": True,
@@ -1607,10 +1483,14 @@ async def create_order_with_payment(order_data: CreateOrderRequest):
             "payment_required": payment_required,
             "payment_method": order_data.payment_method,
             "order": order.to_dict(),
-            "message": "Order created successfully"
+            "message": "Order created successfully",
+            "transaction_time_ms": transaction_result.processing_time_ms
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Unexpected error in order creation: {e}")
         raise HTTPException(status_code=500, detail=f"Order creation failed: {str(e)}")
 
 @router.post("/{order_id}/payment/confirm")
@@ -1701,15 +1581,37 @@ async def get_order_details(order_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to get order details: {str(e)}")
 
 @router.put("/{order_id}/status")
-async def update_order_status(order_id: str, status_data: UpdateOrderStatusRequest):
-    """Update order status"""
-    
+async def update_order_status(
+    order_id: str,
+    status_data: UpdateOrderStatusRequest,
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Update order status (Store Owner Only)
+
+    Requires authentication with store_owner token.
+    Only store owners can update order status.
+    Sends push notification to customer for relevant status changes.
+    """
+
     try:
         # Validate status
         try:
             new_status = OrderStatus(status_data.status)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid order status")
+
+        # Get order details first (need customer_id for notification)
+        order_result = await db.get_order(order_id)
+        if not order_result.success:
+            if "not found" in str(order_result.error).lower():
+                raise HTTPException(status_code=404, detail="Order not found")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to retrieve order: {order_result.error}"
+            )
+
+        order_data = order_result.data
 
         # Update order status in DynamoDB
         update_result = await db.update_order_status(order_id, new_status.value)
@@ -1724,49 +1626,182 @@ async def update_order_status(order_id: str, status_data: UpdateOrderStatusReque
 
         logger.info(f"Order {order_id} status updated to {new_status.value} in DynamoDB")
 
+        # Send push notification for relevant status changes
+        notification_sent = False
+        notification_statuses = ['confirmed', 'preparing', 'ready', 'out_for_delivery', 'delivered']
+
+        if new_status.value in notification_statuses:
+            try:
+                # Get customer_id from order data
+                customer_id = order_data.customer_id if hasattr(order_data, 'customer_id') else None
+
+                if customer_id:
+                    # Generate order number from order_id if not available
+                    order_number = getattr(order_data, 'order_number', None) or order_id[:8].upper()
+
+                    notification_result = await notification_service.send_order_notification(
+                        customer_id=customer_id,
+                        order_id=order_id,
+                        order_number=order_number,
+                        status=new_status.value
+                    )
+
+                    if notification_result.success:
+                        logger.info(f"Push notification sent for order {order_id} status: {new_status.value}")
+                        notification_sent = True
+                    else:
+                        logger.warning(
+                            f"Push notification failed for order {order_id}: {notification_result.error}"
+                        )
+                else:
+                    logger.info(f"No customer_id for order {order_id}, skipping notification")
+
+            except Exception as notif_err:
+                # Don't fail the status update if notification fails
+                logger.error(f"Error sending notification for order {order_id}: {notif_err}")
+
         return {
             "success": True,
             "order_id": order_id,
             "status": new_status.value,
             "message": "Order status updated successfully",
+            "notification_sent": notification_sent,
             "processing_time_ms": update_result.processing_time_ms
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Failed to update order status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update order status: {str(e)}")
 
-@router.get("/")
-async def get_orders(store_id: str = "STORE-001", limit: int = 50, offset: int = 0):
-    """Get orders for a store"""
-    
+@router.get("")
+async def get_orders_by_query(
+    store_id: str = Query(..., description="Store ID to get orders for"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum orders to return"),
+    offset: int = Query(0, ge=0, description="Number of orders to skip")
+):
+    """
+    Get orders for a store using query parameter
+
+    This endpoint is for dashboard use - returns orders for the specified store.
+    """
     try:
-        # In production, this would query the database
-        # orders = db.query(Order).filter(Order.store_id == store_id).offset(offset).limit(limit).all()
-        
-        # For now, return mock data
-        mock_orders = [
-            {
-                "id": f"ORD{i:08d}",
-                "store_id": store_id,
-                "customer_name": f"Customer {i}",
-                "customer_phone": "+919876543210",
-                "total_amount": 100 + (i * 10),
-                "status": "pending",
-                "payment_status": "pending",
-                "created_at": datetime.utcnow().isoformat()
-            }
-            for i in range(1, min(limit + 1, 11))
-        ]
-        
+        import boto3
+        from boto3.dynamodb.conditions import Attr
+
+        dynamodb = boto3.resource('dynamodb', region_name='ap-south-1')
+        orders_table = dynamodb.Table('vyaparai-orders-prod')
+
+        # Scan with filter by store_id (until GSI is created)
+        response = orders_table.scan(
+            FilterExpression=Attr('store_id').eq(store_id),
+            Limit=500  # Scan more to ensure we get enough after filtering
+        )
+
+        orders = response.get('Items', [])
+
+        # Sort by created_at descending and limit
+        orders = sorted(orders, key=lambda x: x.get('created_at', ''), reverse=True)[:limit]
+        logger.info(f"Found {len(orders)} orders for store {store_id}")
+
+        # Format orders for frontend
+        formatted_orders = []
+        for order in orders:
+            # Convert Decimal to float for JSON serialization
+            total_amt = order.get('total_amount', 0)
+            if hasattr(total_amt, '__float__'):
+                total_amt = float(total_amt)
+
+            formatted_orders.append({
+                "id": order.get('id') or order.get('order_id'),
+                "order_id": order.get('id') or order.get('order_id'),
+                "order_number": order.get('order_number', ''),
+                "store_id": order.get('store_id'),
+                "customer_name": order.get('customer_name', 'Unknown'),
+                "customer_phone": order.get('customer_phone', 'N/A'),
+                "delivery_address": order.get('delivery_address', 'N/A'),
+                "items": order.get('items', []),
+                "total_amount": total_amt,
+                "total": total_amt,
+                "status": order.get('status', 'placed'),
+                "payment_status": order.get('payment_status', 'pending'),
+                "payment_method": order.get('payment_method', 'cash'),
+                "created_at": order.get('created_at', ''),
+                "updated_at": order.get('updated_at', '')
+            })
+
         return {
             "success": True,
-            "orders": mock_orders,
-            "total": len(mock_orders),
+            "data": formatted_orders,
+            "total": len(formatted_orders),
             "limit": limit,
             "offset": offset
         }
-        
+
     except Exception as e:
+        logger.error(f"Failed to get orders: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get orders: {str(e)}")
+
+
+@router.get("/store/{store_id}/orders")
+async def get_store_orders(
+    store_id: str,
+    limit: int = Query(50, ge=1, le=100, description="Maximum orders to return"),
+    offset: int = Query(0, ge=0, description="Number of orders to skip"),
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Get orders for a store (Store Owner Only)
+
+    Requires authentication with store_owner token.
+    Returns paginated list of orders for the specified store.
+    """
+    # Verify user has access to the requested store
+    if current_user.get('store_id') and current_user['store_id'] != store_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this store's orders"
+        )
+
+    try:
+        # Get orders from DynamoDB
+        db_result = await db.get_orders_by_store(store_id, limit=limit, offset=offset)
+
+        if not db_result.success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve orders: {db_result.error}"
+            )
+
+        orders = []
+        for order in db_result.data:
+            orders.append({
+                "id": order.order_id,
+                "store_id": order.store_id,
+                "customer_phone": order.customer_phone,
+                "total_amount": order.total_amount,
+                "status": order.status,
+                "payment_method": order.payment_method,
+                "created_at": order.created_at,
+                "updated_at": order.updated_at
+            })
+
+        return {
+            "success": True,
+            "orders": orders,
+            "total": len(orders),
+            "limit": limit,
+            "offset": offset,
+            "processing_time_ms": db_result.processing_time_ms
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get orders: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get orders: {str(e)}")
 
 @router.post("/calculate-total")

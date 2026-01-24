@@ -193,3 +193,47 @@ backup_before_cleanup_*/
 
 # Local development
 .local
+
+# Secrets and credentials
+secrets/
+**/secrets/
+*.pem
+*.key
+*-adminsdk*.json
+firebase-adminsdk*.json
+credentials.json
+secrets.json
+
+# AWS
+.aws-sam/
+samconfig.toml
+.aws/
+
+# Local Development
+docker-data/
+dynamodb-data/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Lambda build artifacts (temporary)
+backend/lambda_temp/
+backend/lambda-package/
+backend/lambda-package-new/
+backend/lambda_build_tmp/
+backend/lambda_deploy/
+backend/lambda_deps/
+backend/lambda_docker_build/
+backend/lambda_fix_deploy/
+backend/lambda_restore_dir/
+backend/lambda-essential/
+backend/app_backup_*/
+backend/backups/
+
+# Test artifacts
+test-results/
+*.cover
+.coverage*
