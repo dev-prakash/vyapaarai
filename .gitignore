@@ -209,6 +209,21 @@ secrets.json
 samconfig.toml
 .aws/
 
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Large binary files
+*.zip
+zi*
+
 # Local Development
 docker-data/
 dynamodb-data/
