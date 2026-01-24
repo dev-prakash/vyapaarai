@@ -51,15 +51,24 @@ def get_ses_client():
 # FastAPI app
 app = FastAPI(title="VyapaarAI Email Auth API")
 
-# CORS is handled by Lambda Function URL configuration
-# Commenting out to prevent duplicate headers that cause CORS conflicts
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
+# CORS configuration - needed for API Gateway access
+CORS_ORIGINS = [
+    "https://vyapaarai.com",
+    "https://www.vyapaarai.com",
+    "https://de98fon4psh1n.cloudfront.net",  # Store dashboard CloudFront
+    "https://d2zz8aoffj79ma.cloudfront.net",
+    "https://duunvuia0g11s.cloudfront.net",
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Store-ID"],
+)
 
 # Configuration
 JWT_SECRET = "vyaparai-jwt-secret-2024-secure"

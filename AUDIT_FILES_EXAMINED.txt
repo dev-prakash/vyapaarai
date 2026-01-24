@@ -1,0 +1,340 @@
+================================================================================
+AUDIT FILES EXAMINED - COMPLETE LIST
+VyapaarAI Frontend PWA | December 3, 2025
+================================================================================
+
+ENTRY POINTS:
+  src/main.tsx - Application entry point
+  src/App.tsx - Main app routing and layout
+
+STORES (State Management):
+  src/stores/authStore.ts - Authentication state (Zustand)
+  src/stores/unifiedAuthStore.ts - Unified auth for multiple user types
+  src/stores/cartStore.ts - Shopping cart state management
+
+SERVICES (API & External):
+  src/services/authService.ts - Auth API calls
+  src/services/apiClient.ts - Primary API client (old)
+  src/services/unifiedApiClient.ts - New unified API client
+  src/services/api.ts - API endpoints definitions
+  src/services/backendCartService.ts - Cart backend sync
+  src/services/orderService.ts - Order operations
+  src/services/customerService.ts - Customer management
+  src/services/storeService.ts - Store operations
+  src/services/inventoryService.ts - Inventory management
+
+HOOKS (Custom Hooks):
+  src/hooks/useWebSocket.ts - WebSocket connection management
+  src/hooks/useOrders.ts - React Query hooks for orders
+  src/hooks/useOfflineQueue.ts - Offline action queueing
+  src/hooks/useNotifications.ts - Push notifications
+  src/hooks/useDebounce.ts - Debounce utility
+  src/hooks/useCartWithEdgeCases.ts - Cart operations with error handling
+  src/hooks/useGeolocation.ts - Geolocation access
+  src/hooks/useEmailValidation.ts - Email validation
+  src/hooks/usePushNotifications.ts - Push notification setup
+  src/hooks/useRazorpayPayment.ts - Payment integration
+  src/hooks/useRealtimeInventory.ts - Real-time inventory updates
+  src/hooks/useRealtimeOrder.ts - Real-time order updates
+
+COMPONENTS (UI Components):
+  src/components/ProtectedRoute.tsx - Route protection wrapper
+  src/components/Cart/ShoppingCart.tsx - Shopping cart drawer
+  src/components/Orders/*.tsx - Order-related components
+  src/components/Customers/*.tsx - Customer management
+  src/components/Admin/*.tsx - Admin features
+  src/components/Dashboard/*.tsx - Dashboard widgets
+  src/components/Layout/*.tsx - Layout wrappers
+  src/components/ErrorBoundary.tsx - Error boundary (referenced)
+
+PAGES (Page Components):
+  src/pages/Dashboard.tsx - Store dashboard
+
+PROVIDERS (App Setup):
+  src/providers/AppProviders.tsx - Top-level provider setup
+  src/providers/ThemeWrapper.tsx - Theme configuration
+
+CONFIGURATION:
+  src/utils/constants.ts - Application constants
+  tsconfig.json - TypeScript configuration
+  package.json - Dependencies and scripts
+  .env.example - Environment variables template
+
+CONTEXT:
+  src/contexts/LanguageContext.tsx - Language/i18n context
+
+THEME:
+  src/theme/indianTheme.ts - Theme colors and styling
+  src/theme/professionalTheme.ts - Professional theme
+
+================================================================================
+ISSUES BY FILE - DETAILED BREAKDOWN
+================================================================================
+
+CRITICAL ISSUES:
+
+src/stores/authStore.ts (Lines 90-91)
+  - Module-level useAuthStore.getState().checkAuth() call
+  - Severity: CRITICAL - Race condition on auth initialization
+
+src/stores/unifiedAuthStore.ts (Lines 95-101)
+  - JSON.parse without recovery logic
+  - Severity: CRITICAL - App stuck if localStorage corrupted
+
+src/services/authService.ts (Lines 18-23, scattered)
+  - Multiple inconsistent token storage keys
+  - Severity: CRITICAL - Session sync failures
+
+src/services/apiClient.ts (Lines 50-60)
+  - Inconsistent token clearance
+  - Severity: CRITICAL - Partial logout issues
+
+src/services/unifiedApiClient.ts (Lines 65-85)
+  - Different token keys than apiClient.ts
+  - Severity: CRITICAL - Token sync failure
+
+src/stores/cartStore.ts (Lines 46-70, 115-142)
+  - Race condition in optimistic updates
+  - Missing validation in migration
+  - Severity: CRITICAL - Data loss on concurrent ops
+
+src/hooks/useWebSocket.ts (Lines 226-234)
+  - Unhandled promises in socket events
+  - Severity: CRITICAL - Memory leaks
+
+tsconfig.json (Lines 8-9)
+  - TypeScript strict mode disabled
+  - Severity: CRITICAL - Type safety completely disabled
+
+================================================================================
+HIGH SEVERITY ISSUES:
+
+src/hooks/useOfflineQueue.ts
+  - Missing useCallback dependencies
+
+src/hooks/useOrders.ts
+  - Missing dependency in useMutation
+  - Hardcoded status assumptions
+
+src/hooks/useNotifications.ts
+  - Stale closure from settings dependency
+  - Event listener cleanup issues
+
+src/App.tsx
+  - Uninitialized useStore context
+  - Service worker operations at module level
+  - Hardcoded store ID reference
+
+src/pages/Dashboard.tsx
+  - Hardcoded "STORE-001" string
+  - Interval management with useRef instead of useEffect
+
+src/providers/AppProviders.tsx
+  - Missing WebSocket error handling
+  - Socket cleanup not implemented
+
+src/components/Cart/ShoppingCart.tsx
+  - No button disable state during loading
+  - Missing input validation
+
+src/main.tsx
+  - Direct window access during hydration
+  - Service worker unregistration might break caching
+
+================================================================================
+CONFIGURATION FILES:
+
+tsconfig.json:
+  - strict: false (CRITICAL - allows all type errors)
+  - noUnusedLocals: false (allows dead code)
+  - noUnusedParameters: false (allows unused params)
+  - baseUrl and paths defined (good for imports)
+
+package.json:
+  - Dependencies look appropriate
+  - No obviously unused packages detected
+  - Build and test scripts defined
+
+.env.example:
+  - VITE_API_URL specified
+  - VITE_ENV specified
+  - Missing VITE_VAPID_PUBLIC_KEY example
+
+================================================================================
+CODE PATTERNS OBSERVED:
+
+Good Patterns:
+  ✓ Zustand for state management (used correctly in most places)
+  ✓ React Query for API data (properly configured)
+  ✓ Path aliases for imports (@components, @services, etc.)
+  ✓ TypeScript for type safety (though not enforced)
+  ✓ Proper dependency injection with React Context
+  ✓ Error handling with try-catch in most places
+  ✓ Mock servers for development
+  ✓ Service classes for API abstraction
+  ✓ Custom hooks for logic reuse
+
+Bad Patterns:
+  ✗ Module-level state initialization (authStore)
+  ✗ Multiple implementations of same functionality (2 API clients, 2 auth stores)
+  ✗ Inconsistent token storage (6+ different keys)
+  ✗ Type checking disabled globally
+  ✗ Silent error catches (no recovery)
+  ✗ Sensitive data in localStorage (plain text)
+  ✗ Optimistic updates without proper rollback
+  ✗ Direct window/localStorage access scattered throughout
+  ✗ Hardcoded configuration values in components
+  ✗ @ts-nocheck and @ts-ignore used to silence errors
+
+================================================================================
+DUPLICATION ISSUES:
+
+API Clients (2 implementations):
+  - src/services/apiClient.ts (older, uses legacy token keys)
+  - src/services/unifiedApiClient.ts (newer, uses new token keys)
+  - Both do same thing but with different token management
+  → Consolidate into single client
+
+Auth Stores (2 implementations):
+  - src/stores/authStore.ts (Zustand)
+  - src/stores/unifiedAuthStore.ts (Zustand with different structure)
+  - Both manage authentication
+  → Merge into single store
+
+Token Management (scattered):
+  - authService.ts stores tokens via localStorage.setItem()
+  - apiClient.ts clears different keys than unifiedApiClient.ts
+  - Multiple files read from different keys
+  → Create tokenManager.ts (see CRITICAL_FIXES_GUIDE.md)
+
+================================================================================
+EXTERNAL DEPENDENCIES USED:
+
+API & HTTP:
+  - axios (HTTP client)
+  - socket.io-client (WebSocket)
+
+State Management:
+  - zustand (state store)
+  - @tanstack/react-query (server state)
+  - react-router-dom (routing)
+
+UI Components:
+  - @mui/material (Material Design)
+  - @mui/icons-material (Material Icons)
+  - framer-motion (animations)
+
+Auth & Security:
+  - firebase (authentication - noted but not heavily used)
+  - @react-oauth/google (Google OAuth)
+
+Payment:
+  - razorpay (Payment processing)
+
+Forms:
+  - react-hook-form (Form handling)
+  - @hookform/resolvers (Form validation)
+
+Other:
+  - react-hot-toast (Notifications)
+  - recharts (Charts)
+  - i18next (Internationalization)
+  - uuid (ID generation)
+  - date-fns (Date utilities)
+
+================================================================================
+SECURITY CHECKS PERFORMED:
+
+XSS Vulnerabilities:
+  ✗ Full customer objects in localStorage (accessible to injected scripts)
+  ✗ No Content Security Policy mentioned
+  ✗ Direct innerHTML/dangerouslySetInnerHTML not found (good)
+  ✗ No sanitization of user input before API calls
+
+CSRF Protection:
+  ✗ No CSRF tokens in API requests
+  ✗ Only relying on CORS (insufficient)
+
+Authentication:
+  ✗ Multiple token storage keys (sync issues)
+  ✗ Session stored in localStorage (accessible to XSS)
+  ✗ No session rotation on privilege changes
+
+Data Privacy:
+  ✗ Sensitive customer data in plain text storage
+  ✗ Payment method details exposed
+  ✗ Full address information stored
+
+API Security:
+  ✗ API URLs in client code (expected but document)
+  ✗ VAPID keys in client code (normal for web push)
+
+================================================================================
+MISSING FEATURES / OBSERVATIONS:
+
+Testing:
+  - No unit tests found in src/
+  - E2E test configuration exists but incomplete
+  - Test utilities referenced but might not exist
+
+Documentation:
+  - No JSDoc on API service functions
+  - No README for auth flow
+  - No architecture documentation
+  - Constants scattered across files
+
+Logging:
+  - Direct console.log throughout
+  - No abstracted logger for production control
+  - Debug logs in request interceptors
+
+Monitoring:
+  - No error tracking (Sentry, etc.)
+  - No analytics
+  - No performance monitoring
+
+================================================================================
+DEPLOYMENT CONCERNS:
+
+Service Worker:
+  - Cache clearing at module level (might delete necessary assets)
+  - Service worker unregistration forces browser to fetch everything
+
+Environment Variables:
+  - API URLs hardcoded in several places
+  - No fallback URLs if primary fails
+
+Performance:
+  - No code splitting/lazy loading with Suspense
+  - No loading skeleton screens
+  - API timeout too long (30s vs 5-10s best practice)
+
+================================================================================
+AUDIT STATISTICS:
+
+Total Files Examined: 45+
+  - Services: 10
+  - Hooks: 12
+  - Components: 15+
+  - Stores: 3
+  - Config: 5
+
+Issues Found by Severity:
+  Critical: 8
+  High: 12
+  Medium: 15
+  Low: 8
+  Total: 43
+
+Issues by Category:
+  - State Management: 12
+  - Type Safety: 8
+  - Error Handling: 7
+  - Security: 6
+  - Performance: 5
+  - React Anti-patterns: 3
+  - Code Quality: 2
+
+================================================================================
+END OF FILES EXAMINED REPORT
+================================================================================

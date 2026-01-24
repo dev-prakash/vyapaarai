@@ -2,8 +2,10 @@ import redis
 import json
 import os
 import hashlib
+import threading
 from functools import wraps
 from typing import Optional, Any, Callable
+from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
@@ -194,4 +196,278 @@ def invalidate_products_cache():
 def invalidate_categories_cache():
     """Invalidate all category-related cache"""
     return invalidate_cache(CACHE_PATTERNS["categories"])
+
+
+# =============================================================================
+# OTP Storage Functions
+# =============================================================================
+# These functions provide secure OTP storage with automatic expiration.
+# Uses Redis when available, falls back to in-memory storage for development.
+#
+# SECURITY NOTE: In-memory storage is NOT suitable for production with multiple
+# workers. Always use Redis in production for proper distributed locking.
+
+# In-memory fallback storage for OTPs (used when Redis is unavailable)
+_otp_memory_storage: dict = {}
+# Thread lock for safe concurrent access to in-memory storage
+_otp_memory_lock = threading.Lock()
+
+OTP_KEY_PREFIX = "otp:"
+OTP_DEFAULT_EXPIRY = 300  # 5 minutes in seconds
+OTP_MAX_ATTEMPTS = 5  # Maximum verification attempts before lockout
+
+
+def store_otp_redis(phone: str, otp_data: dict, expiry_seconds: int = OTP_DEFAULT_EXPIRY) -> bool:
+    """
+    Store OTP data in Redis with automatic expiration.
+
+    Args:
+        phone: Phone number (used as key)
+        otp_data: Dictionary with OTP and metadata (otp, created_at, attempts, etc.)
+        expiry_seconds: Time until OTP expires (default: 5 minutes)
+
+    Returns:
+        True if stored successfully, False otherwise
+    """
+    key = f"{OTP_KEY_PREFIX}{phone}"
+
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            # Store as JSON with TTL
+            redis_client.setex(
+                key,
+                expiry_seconds,
+                json.dumps(otp_data, default=str)
+            )
+            logger.debug(f"OTP stored in Redis for: {phone[-4:].rjust(len(phone), '*')}")
+            return True
+        except Exception as e:
+            logger.warning(f"Redis OTP store failed, using memory fallback: {e}")
+
+    # Fallback to in-memory storage with thread-safe access
+    with _otp_memory_lock:
+        otp_data['_memory_expires_at'] = (datetime.utcnow() + timedelta(seconds=expiry_seconds)).isoformat()
+        _otp_memory_storage[phone] = otp_data
+        logger.debug(f"OTP stored in memory for: {phone[-4:].rjust(len(phone), '*')}")
+    return True
+
+
+def get_otp_redis(phone: str) -> Optional[dict]:
+    """
+    Retrieve OTP data from Redis or memory fallback.
+
+    Args:
+        phone: Phone number to look up
+
+    Returns:
+        OTP data dictionary or None if not found/expired
+    """
+    key = f"{OTP_KEY_PREFIX}{phone}"
+
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            data = redis_client.get(key)
+            if data:
+                logger.debug(f"OTP retrieved from Redis for: {phone[-4:].rjust(len(phone), '*')}")
+                return json.loads(data)
+            return None
+        except Exception as e:
+            logger.warning(f"Redis OTP get failed, checking memory fallback: {e}")
+
+    # Fallback to in-memory storage with thread-safe access
+    with _otp_memory_lock:
+        if phone in _otp_memory_storage:
+            otp_data = _otp_memory_storage[phone].copy()  # Return a copy to prevent external modification
+            # Check if memory entry has expired
+            expires_at = otp_data.get('_memory_expires_at')
+            if expires_at:
+                if datetime.utcnow() > datetime.fromisoformat(expires_at):
+                    del _otp_memory_storage[phone]
+                    logger.debug(f"OTP expired in memory for: {phone[-4:].rjust(len(phone), '*')}")
+                    return None
+            logger.debug(f"OTP retrieved from memory for: {phone[-4:].rjust(len(phone), '*')}")
+            return otp_data
+
+    return None
+
+
+def update_otp_redis(phone: str, otp_data: dict) -> bool:
+    """
+    Update OTP data while preserving TTL.
+
+    Args:
+        phone: Phone number
+        otp_data: Updated OTP data dictionary
+
+    Returns:
+        True if updated successfully, False otherwise
+    """
+    key = f"{OTP_KEY_PREFIX}{phone}"
+
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            # Get remaining TTL
+            ttl = redis_client.ttl(key)
+            if ttl > 0:
+                redis_client.setex(
+                    key,
+                    ttl,
+                    json.dumps(otp_data, default=str)
+                )
+                logger.debug(f"OTP updated in Redis for: {phone[-4:].rjust(len(phone), '*')}")
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Redis OTP update failed, updating memory fallback: {e}")
+
+    # Fallback to in-memory storage with thread-safe access
+    with _otp_memory_lock:
+        if phone in _otp_memory_storage:
+            # Preserve the memory expiry timestamp
+            expires_at = _otp_memory_storage[phone].get('_memory_expires_at')
+            otp_data['_memory_expires_at'] = expires_at
+            _otp_memory_storage[phone] = otp_data
+            logger.debug(f"OTP updated in memory for: {phone[-4:].rjust(len(phone), '*')}")
+            return True
+
+    return False
+
+
+def delete_otp_redis(phone: str) -> bool:
+    """
+    Delete OTP data (after successful verification or too many attempts).
+
+    Args:
+        phone: Phone number
+
+    Returns:
+        True if deleted, False if not found
+    """
+    key = f"{OTP_KEY_PREFIX}{phone}"
+    deleted = False
+
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            result = redis_client.delete(key)
+            deleted = result > 0
+            if deleted:
+                logger.debug(f"OTP deleted from Redis for: {phone[-4:].rjust(len(phone), '*')}")
+        except Exception as e:
+            logger.warning(f"Redis OTP delete failed: {e}")
+
+    # Also clean up memory fallback with thread-safe access
+    with _otp_memory_lock:
+        if phone in _otp_memory_storage:
+            del _otp_memory_storage[phone]
+            deleted = True
+            logger.debug(f"OTP deleted from memory for: {phone[-4:].rjust(len(phone), '*')}")
+
+    return deleted
+
+
+def increment_otp_attempts(phone: str) -> tuple[int, bool]:
+    """
+    Atomically increment OTP verification attempts.
+
+    This is the critical function for preventing race conditions during
+    concurrent verification attempts. Returns the new attempt count and
+    whether max attempts have been exceeded.
+
+    Args:
+        phone: Phone number
+
+    Returns:
+        Tuple of (new_attempts_count, exceeded_max_attempts)
+        Returns (-1, True) if OTP not found
+    """
+    key = f"{OTP_KEY_PREFIX}{phone}"
+
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            # Use Redis WATCH/MULTI/EXEC for atomic increment
+            pipe = redis_client.pipeline(True)  # True for transactional pipeline
+            while True:
+                try:
+                    pipe.watch(key)
+                    data = pipe.get(key)
+                    if not data:
+                        pipe.unwatch()
+                        return (-1, True)
+
+                    otp_data = json.loads(data)
+                    otp_data['attempts'] = otp_data.get('attempts', 0) + 1
+                    new_attempts = otp_data['attempts']
+                    exceeded = new_attempts >= OTP_MAX_ATTEMPTS
+
+                    # Get remaining TTL
+                    ttl = pipe.ttl(key)
+
+                    pipe.multi()
+                    if exceeded:
+                        # Delete on max attempts
+                        pipe.delete(key)
+                    else:
+                        pipe.setex(key, max(ttl, 1), json.dumps(otp_data, default=str))
+                    pipe.execute()
+
+                    logger.debug(f"OTP attempts incremented to {new_attempts} for: {phone[-4:].rjust(len(phone), '*')}")
+                    return (new_attempts, exceeded)
+                except redis.WatchError:
+                    # Another client modified the key, retry
+                    continue
+        except Exception as e:
+            logger.warning(f"Redis atomic increment failed, using memory fallback: {e}")
+
+    # Fallback to in-memory storage with thread-safe access
+    with _otp_memory_lock:
+        if phone not in _otp_memory_storage:
+            return (-1, True)
+
+        otp_data = _otp_memory_storage[phone]
+
+        # Check expiration
+        expires_at = otp_data.get('_memory_expires_at')
+        if expires_at and datetime.utcnow() > datetime.fromisoformat(expires_at):
+            del _otp_memory_storage[phone]
+            return (-1, True)
+
+        # Atomic increment within lock
+        otp_data['attempts'] = otp_data.get('attempts', 0) + 1
+        new_attempts = otp_data['attempts']
+        exceeded = new_attempts >= OTP_MAX_ATTEMPTS
+
+        if exceeded:
+            del _otp_memory_storage[phone]
+            logger.debug(f"OTP deleted after max attempts for: {phone[-4:].rjust(len(phone), '*')}")
+
+        logger.debug(f"OTP attempts incremented to {new_attempts} for: {phone[-4:].rjust(len(phone), '*')}")
+        return (new_attempts, exceeded)
+
+
+def get_otp_storage_status() -> dict:
+    """
+    Get OTP storage status for monitoring.
+
+    Returns:
+        Dictionary with storage backend and stats
+    """
+    with _otp_memory_lock:
+        memory_count = len(_otp_memory_storage)
+
+    status = {
+        "backend": "redis" if REDIS_AVAILABLE else "memory",
+        "memory_entries": memory_count,
+        "thread_safe": True,
+        "max_attempts": OTP_MAX_ATTEMPTS
+    }
+
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            # Count OTP keys in Redis
+            otp_keys = list(redis_client.scan_iter(match=f"{OTP_KEY_PREFIX}*"))
+            status["redis_otp_count"] = len(otp_keys)
+        except Exception as e:
+            status["redis_error"] = str(e)
+
+    return status
 

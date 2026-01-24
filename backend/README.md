@@ -80,6 +80,7 @@ REDIS_URL=redis://localhost:6379
 # Google Services (optional)
 GOOGLE_API_KEY=your_gemini_api_key
 GOOGLE_TRANSLATE_API_KEY=your_translate_api_key
+GOOGLE_MAPS_API_KEY=your_google_maps_api_key  # For store/customer address geocoding
 
 # Database (future)
 DATABASE_URL=postgresql://user:password@localhost/vyaparai
@@ -95,6 +96,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 - **Redis**: For distributed rate limiting and caching
 - **Google Gemini**: For AI-powered response generation
 - **Google Translate**: For regional language support
+- **Google Maps Geocoding**: For address-to-coordinates conversion (store discovery)
 - **PostgreSQL**: For persistent data storage (future)
 
 ## 📖 Usage
@@ -236,6 +238,21 @@ POST /api/v1/orders/webhooks/rcs
 ```http
 POST /api/v1/orders/webhooks/sms
 ```
+
+### Store Discovery Endpoints
+
+#### Search Nearby Stores
+```http
+GET /api/v1/stores/nearby?landmark=Connaught+Place&city=Delhi&radius=10
+```
+Response includes stores sorted by distance with lat/lng-based search.
+
+**Search Strategies (automatically selected)**:
+1. GPS coordinates (if lat/lng provided) - No API call
+2. Cached pincode coordinates (if store with pincode exists) - No API call
+3. Cached landmark coordinates (if store address contains landmark) - No API call
+4. Google Maps Geocoding API (fallback when no cached coordinates)
+5. Text-based filtering (city/state only)
 
 ### Health Check Endpoints
 
@@ -398,6 +415,7 @@ ENVIRONMENT=production
 REDIS_URL=redis://redis:6379
 GOOGLE_API_KEY=your_production_key
 GOOGLE_TRANSLATE_API_KEY=your_production_key
+GOOGLE_MAPS_API_KEY=your_production_maps_key  # Store/address geocoding
 DATABASE_URL=postgresql://user:pass@db:5432/vyaparai
 SECRET_KEY=your_production_secret
 ```
