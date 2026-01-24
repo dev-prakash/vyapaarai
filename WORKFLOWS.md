@@ -769,6 +769,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## WORKFLOW: Deployment
+
+### Trigger
+User runs `/deploy <command>` or requests deployment.
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `/deploy backend` | Deploy Lambda function with regression tests |
+| `/deploy frontend` | Deploy frontend to S3 + CloudFront |
+| `/deploy all` | Full stack deployment (requires confirmation) |
+| `/deploy lambda` | Quick Lambda update (option to skip tests) |
+| `/deploy status` | Show current deployment status |
+| `/deploy rollback` | Rollback to previous Lambda version |
+
+### Execution
+
+```bash
+./scripts/deploy.sh <command>
+```
+
+### Pre-Deployment Checks
+1. AWS CLI installed and configured
+2. AWS credentials valid
+3. Git status clean (warns if uncommitted changes)
+4. Regression tests pass (for backend deployment)
+
+### Deployment Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    /deploy backend                          │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Verify AWS credentials                                   │
+│ 2. Check git status (warn if dirty)                         │
+│ 3. Run regression tests                                     │
+│ 4. Build Lambda package (app/ + dependencies)               │
+│ 5. Upload to S3: vyaparai-lambda-deployments               │
+│ 6. Update Lambda function: vyaparai-api-prod               │
+│ 7. Wait for deployment to complete                          │
+│ 8. Report success/failure                                   │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    /deploy frontend                         │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Verify AWS credentials                                   │
+│ 2. Build frontend: npm run build                           │
+│ 3. Sync to S3: www.vyapaarai.com                           │
+│ 4. Invalidate CloudFront cache                             │
+│ 5. Report success/failure                                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### AWS Resources
+
+| Resource | Name/ID |
+|----------|---------|
+| Lambda Function | `vyaparai-api-prod` |
+| S3 (Frontend) | `www.vyapaarai.com` |
+| S3 (Deployments) | `vyaparai-lambda-deployments` |
+| CloudFront | `E1UY93SVXV8QOF` |
+| Region | `ap-south-1` |
+
+### Safety Rules
+- `/deploy all` requires explicit "yes" confirmation
+- Backend deployment requires regression tests to pass
+- Quick Lambda update (`/deploy lambda`) offers test skip option
+- Uncommitted changes trigger warning (can proceed)
+- Rollback available for Lambda deployments
+
+---
+
 ## Critical Rules
 
 1. **NEVER mention AI/Claude** in code, comments, commits, or documentation

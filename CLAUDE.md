@@ -64,6 +64,16 @@ Feature: Add SMS notification when customer credit exceeds 80% of limit
 | `/finish` | Merge to develop: `./scripts/finish_feature.sh` |
 | `/release <ver>` | Release to main: `./scripts/release.sh <ver>` |
 
+### Deployment
+| Command | Description |
+|---------|-------------|
+| `/deploy backend` | Deploy backend (Lambda) with tests |
+| `/deploy frontend` | Deploy frontend (S3 + CloudFront) |
+| `/deploy all` | Full stack deployment |
+| `/deploy lambda` | Quick Lambda update (skip tests option) |
+| `/deploy status` | Show deployment status |
+| `/deploy rollback` | Rollback to previous version |
+
 ### Testing
 | Command | Description |
 |---------|-------------|
