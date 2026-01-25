@@ -46,7 +46,7 @@ async def get_gst_categories():
     - Cess rate (if applicable)
     - Description
     """
-    return gst_service.get_all_gst_categories()
+    return await gst_service.get_all_gst_categories()
 
 
 @router.get(
@@ -69,7 +69,7 @@ async def get_gst_categories_by_rate(
             detail=f"Invalid rate. Must be one of {valid_rates}"
         )
 
-    all_categories = gst_service.get_all_gst_categories()
+    all_categories = await gst_service.get_all_gst_categories()
     return [c for c in all_categories if c.gst_rate == Decimal(str(rate))]
 
 
@@ -96,7 +96,7 @@ async def get_hsn_info(hsn_code: str):
     Raises:
         404: HSN code not found
     """
-    result = gst_service.get_hsn_info(hsn_code)
+    result = await gst_service.get_hsn_info(hsn_code)
     if not result:
         raise HTTPException(
             status_code=404,
@@ -124,7 +124,7 @@ async def suggest_gst_category(
     This is a basic suggestion - may not be accurate for all products.
     Always verify with official HSN code lookup.
     """
-    result = gst_service.suggest_gst_category(product_name)
+    result = await gst_service.suggest_gst_category(product_name)
     if not result:
         return None
     return result

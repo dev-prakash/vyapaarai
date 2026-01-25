@@ -69,6 +69,7 @@ run_tests() {
 
 deploy_backend() {
     local skip_tests=${1:-false}
+    local skip_smoke=${2:-false}
 
     log_info "=== Backend Deployment ==="
     cd "$PROJECT_ROOT/backend"
@@ -83,31 +84,43 @@ deploy_backend() {
     rm -rf lambda_deploy lambda_function.zip
     mkdir -p lambda_deploy
 
+    # Install dependencies using Docker for correct x86_64 architecture
+    # CRITICAL: Lambda runs on Linux x86_64, Mac builds ARM64 binaries
+    log_info "Installing dependencies with Docker (linux/amd64)..."
+    if command -v docker &> /dev/null; then
+        docker run --platform linux/amd64 --rm \
+            -v "$(pwd)":/var/task \
+            public.ecr.aws/sam/build-python3.11:latest \
+            pip install -r requirements.txt -t /var/task/lambda_deploy/ --quiet
+    else
+        log_warn "Docker not available, using pip directly (may cause issues on Lambda)"
+        pip install -r requirements.txt -t lambda_deploy/ --quiet
+    fi
+
     # Copy application code
     cp -r app lambda_deploy/
     cp lambda_handler.py lambda_deploy/
 
-    # Install dependencies
-    log_info "Installing dependencies..."
-    pip install -r requirements.txt -t lambda_deploy/ --quiet
-
     # Create ZIP
+    # CRITICAL: Keep .dist-info directories - required for package metadata
     cd lambda_deploy
-    zip -r ../lambda_function.zip . -x "*.pyc" -x "*__pycache__*" -x "*.dist-info/*" > /dev/null
+    zip -r ../lambda_function.zip . -x "*.pyc" -x "*__pycache__*" > /dev/null
     cd ..
 
     log_info "Package size: $(du -h lambda_function.zip | cut -f1)"
 
-    # Upload to S3
-    log_info "Uploading to S3..."
-    aws s3 cp lambda_function.zip "s3://${S3_DEPLOYMENTS}/backend/lambda_function.zip" --region "$AWS_REGION"
+    # Upload to S3 with timestamp
+    local timestamp=$(date +%Y%m%d%H%M%S)
+    local s3_key="backend/lambda_function_${timestamp}.zip"
+    log_info "Uploading to S3: $s3_key"
+    aws s3 cp lambda_function.zip "s3://${S3_DEPLOYMENTS}/${s3_key}" --region "$AWS_REGION"
 
     # Update Lambda
     log_info "Updating Lambda function..."
     aws lambda update-function-code \
         --function-name "$LAMBDA_FUNCTION" \
         --s3-bucket "$S3_DEPLOYMENTS" \
-        --s3-key "backend/lambda_function.zip" \
+        --s3-key "$s3_key" \
         --region "$AWS_REGION" > /dev/null
 
     # Wait for update
@@ -115,6 +128,19 @@ deploy_backend() {
     aws lambda wait function-updated --function-name "$LAMBDA_FUNCTION" --region "$AWS_REGION"
 
     log_success "Backend deployed successfully!"
+
+    # Run smoke tests unless skipped
+    if [[ "$skip_smoke" != "true" ]]; then
+        log_info "Running post-deployment smoke tests..."
+        sleep 5  # Wait for Lambda to warm up
+        if "$PROJECT_ROOT/scripts/smoke_test.sh" prod; then
+            log_success "Smoke tests passed!"
+        else
+            log_error "Smoke tests FAILED! Consider rolling back."
+            log_info "To rollback, run: ./scripts/deploy.sh rollback"
+            exit 1
+        fi
+    fi
 }
 
 deploy_frontend() {
