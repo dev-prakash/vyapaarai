@@ -392,9 +392,17 @@ async def get_inventory_summary(store_id: str = Query(..., description="Store ID
     try:
         summary = await inventory_service.get_inventory_summary(store_id)
 
+        # Map field names to match frontend expectations
         return {
             "success": True,
-            "summary": summary
+            "data": {
+                "total_products": summary.get("total_products", 0),
+                "active_products": summary.get("active_products", 0),
+                "total_stock_value": summary.get("total_stock_value", 0),
+                "low_stock_count": summary.get("low_stock", 0),
+                "out_of_stock_count": summary.get("out_of_stock", 0),
+                "store_id": store_id
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get inventory summary: {str(e)}")

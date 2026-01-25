@@ -400,6 +400,63 @@ class TestInventoryEndpoints:
         )
 
 
+class TestInventorySummaryAPI:
+    """
+    CRITICAL: Test that inventory summary API returns correct field names.
+
+    This catches issues where the frontend expects specific field names
+    but backend returns different ones, causing dashboard to show 0 values.
+    """
+
+    @pytest.mark.regression
+    def test_inventory_summary_returns_expected_fields(self):
+        """
+        CRITICAL: Verify inventory summary endpoint returns fields expected by frontend.
+
+        Frontend expects:
+        - total_products
+        - active_products
+        - total_stock_value
+        - low_stock_count (NOT low_stock)
+        - out_of_stock_count (NOT out_of_stock)
+        - store_id
+
+        This caught the dashboard showing 0 products bug on 2026-01-25.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Find the get_inventory_summary endpoint
+        summary_pattern = r'@router\.get\s*\(\s*["\']\/summary["\']\)'
+        match = re.search(summary_pattern, source)
+        assert match is not None, "GET /summary endpoint not found in inventory.py"
+
+        # The endpoint should return 'data' key (not 'summary')
+        # because frontend expects response.data.data
+        assert '"data":' in source or "'data':" in source, (
+            "Inventory summary endpoint should return 'data' key for frontend compatibility"
+        )
+
+        # Verify expected field names are present
+        expected_fields = [
+            'low_stock_count',
+            'out_of_stock_count',
+            'total_stock_value',
+            'total_products',
+            'store_id'
+        ]
+
+        for field in expected_fields:
+            assert f'"{field}"' in source or f"'{field}'" in source, (
+                f"Missing expected field '{field}' in inventory summary response. "
+                f"Frontend dashboardService expects this field."
+            )
+
+
 class TestDependencyVersions:
     """Test that critical dependencies are compatible versions"""
 

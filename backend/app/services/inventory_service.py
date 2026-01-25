@@ -679,7 +679,7 @@ class InventoryService:
                 "active_products": active_products,
                 "out_of_stock": out_of_stock,
                 "low_stock": low_stock,
-                "total_inventory_value": round(total_value, 2)
+                "total_stock_value": round(total_value, 2)
             }
 
         except Exception as e:
@@ -873,16 +873,16 @@ class InventoryService:
             return {"success": False, "error": "Mock mode - cannot update products"}
 
         try:
-            # First, verify the product exists and is a custom product owned by this store
+            # First, verify the product exists in this store's inventory
             existing_product = await self.get_product(store_id, product_id)
 
             if not existing_product:
                 return {"success": False, "error": "Product not found"}
 
-            if existing_product.get('product_source') != PRODUCT_SOURCE_CUSTOM:
-                return {"success": False, "error": "Cannot update global catalog products"}
+            is_custom_product = existing_product.get('product_source') == PRODUCT_SOURCE_CUSTOM
 
-            if existing_product.get('source_store_id') != store_id:
+            # For custom products, verify ownership
+            if is_custom_product and existing_product.get('source_store_id') != store_id:
                 return {"success": False, "error": "Not authorized to update this product"}
 
             if existing_product.get('promotion_status') == PROMOTION_STATUS_PENDING:
@@ -893,16 +893,29 @@ class InventoryService:
             expression_values = {}
             expression_names = {}
 
-            # Allowed fields to update (includes GST fields)
-            allowed_fields = {
-                'product_name', 'brand', 'category', 'subcategory', 'description',
-                'barcode', 'selling_price', 'cost_price', 'mrp', 'tax_rate',
+            # Store-specific fields (can be updated for ANY product in store inventory)
+            store_specific_fields = {
+                'selling_price', 'cost_price', 'mrp', 'tax_rate',
                 'discount_percentage', 'current_stock', 'min_stock_level',
-                'max_stock_level', 'unit', 'is_active', 'is_returnable',
-                'is_perishable', 'image', 'image_urls',
+                'max_stock_level', 'is_active', 'is_returnable',
+                'is_perishable', 'location',
                 # GST fields
                 'hsn_code', 'gst_rate', 'cess_rate', 'is_gst_exempt', 'gst_category'
             }
+
+            # Product detail fields (can ONLY be updated for custom products)
+            product_detail_fields = {
+                'product_name', 'brand', 'brand_name', 'category', 'subcategory',
+                'description', 'barcode', 'sku', 'unit', 'image', 'image_urls',
+                'size', 'size_unit', 'variant_type'
+            }
+
+            # Determine allowed fields based on product type
+            if is_custom_product:
+                allowed_fields = store_specific_fields | product_detail_fields
+            else:
+                # Global catalog products: only store-specific fields
+                allowed_fields = store_specific_fields
 
             for field, value in updates.items():
                 if field not in allowed_fields:
@@ -1468,7 +1481,7 @@ class InventoryService:
             "active_products": 0,
             "out_of_stock": 0,
             "low_stock": 0,
-            "total_inventory_value": 0,
+            "total_stock_value": 0,
             "error": "DynamoDB not available - using fallback mode"
         }
 
