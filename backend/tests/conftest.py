@@ -9,13 +9,23 @@ from typing import Generator, Dict, Any, List
 from decimal import Decimal
 from datetime import datetime, timedelta
 import os
+import sys
 import uuid
+
+# Add backend directory to Python path for app imports
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
 
 # Force test environment
 os.environ["VYAPAARAI_ENV"] = "test"
 os.environ["AWS_DEFAULT_REGION"] = "ap-south-1"
 os.environ["AWS_ACCESS_KEY_ID"] = "testing"
 os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+os.environ["DATABASE_URL"] = "postgresql://test:test@localhost/test"
+os.environ["REDIS_URL"] = "redis://localhost:6379"
+os.environ["GOOGLE_API_KEY"] = "test-api-key"
+os.environ["JWT_SECRET"] = "test-jwt-secret-key-for-testing"
 
 
 class DynamoDBSchemas:
