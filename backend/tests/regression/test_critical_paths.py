@@ -406,20 +406,22 @@ class TestInventorySummaryAPI:
 
     This catches issues where the frontend expects specific field names
     but backend returns different ones, causing dashboard to show 0 values.
+
+    Bug History:
+    - 2026-01-25: Dashboard showed 0 products because frontend expected
+      response.data.data but backend returned response.data.summary
+    - 2026-01-25: Inventory page showed ₹0 stock value because
+      inventoryService expected response.data.summary with low_stock/out_of_stock
+      but backend returned response.data.data with low_stock_count/out_of_stock_count
     """
 
     @pytest.mark.regression
-    def test_inventory_summary_returns_expected_fields(self):
+    def test_inventory_summary_returns_data_key_not_summary(self):
         """
-        CRITICAL: Verify inventory summary endpoint returns fields expected by frontend.
+        CRITICAL: Verify inventory summary returns 'data' key, not 'summary'.
 
-        Frontend expects:
-        - total_products
-        - active_products
-        - total_stock_value
-        - low_stock_count (NOT low_stock)
-        - out_of_stock_count (NOT out_of_stock)
-        - store_id
+        Both frontend services (dashboardService and inventoryService) expect:
+        - response.data.data (NOT response.data.summary)
 
         This caught the dashboard showing 0 products bug on 2026-01-25.
         """
@@ -435,11 +437,35 @@ class TestInventorySummaryAPI:
         match = re.search(summary_pattern, source)
         assert match is not None, "GET /summary endpoint not found in inventory.py"
 
-        # The endpoint should return 'data' key (not 'summary')
-        # because frontend expects response.data.data
+        # The endpoint MUST return 'data' key (not 'summary')
+        # Frontend expects response.data.data
         assert '"data":' in source or "'data':" in source, (
-            "Inventory summary endpoint should return 'data' key for frontend compatibility"
+            "Inventory summary endpoint MUST return 'data' key.\n"
+            "Frontend dashboardService and inventoryService both expect response.data.data\n"
+            "Returning 'summary' key will cause dashboard to show 0 products/stock value."
         )
+
+    @pytest.mark.regression
+    def test_inventory_summary_returns_expected_fields(self):
+        """
+        CRITICAL: Verify inventory summary endpoint returns fields expected by frontend.
+
+        Frontend expects these exact field names in response.data.data:
+        - total_products
+        - active_products
+        - total_stock_value
+        - low_stock_count (NOT low_stock - frontend maps this)
+        - out_of_stock_count (NOT out_of_stock - frontend maps this)
+        - store_id
+
+        This caught the inventory page showing ₹0 stock value bug on 2026-01-25.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
 
         # Verify expected field names are present
         expected_fields = [
@@ -452,9 +478,55 @@ class TestInventorySummaryAPI:
 
         for field in expected_fields:
             assert f'"{field}"' in source or f"'{field}'" in source, (
-                f"Missing expected field '{field}' in inventory summary response. "
-                f"Frontend dashboardService expects this field."
+                f"Missing expected field '{field}' in inventory summary response.\n"
+                f"Frontend services expect this exact field name.\n"
+                f"Using different names (e.g., 'low_stock' instead of 'low_stock_count') "
+                f"will cause inventory stats to show as 0."
             )
+
+    @pytest.mark.regression
+    def test_inventory_summary_does_not_return_wrong_field_names(self):
+        """
+        CRITICAL: Verify inventory summary does NOT return old/wrong field names.
+
+        The summary endpoint must NOT return these field names directly:
+        - 'summary' as the response key (should be 'data')
+        - 'low_stock' without '_count' suffix in the response
+        - 'out_of_stock' without '_count' suffix in the response
+
+        These old names cause frontend to show 0 values.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Extract just the get_inventory_summary function
+        # Find from @router.get("/summary") to next @router or end
+        summary_start = source.find('@router.get("/summary")')
+        if summary_start == -1:
+            summary_start = source.find("@router.get('/summary')")
+
+        assert summary_start != -1, "GET /summary endpoint not found"
+
+        # Find next route decorator or end of file
+        next_route = source.find('@router.', summary_start + 1)
+        if next_route == -1:
+            next_route = len(source)
+
+        summary_func = source[summary_start:next_route]
+
+        # The return statement should NOT have "summary": as a key
+        # It should have "data": instead
+        return_pattern = r'return\s*\{[^}]*"summary"\s*:'
+        match = re.search(return_pattern, summary_func)
+        assert match is None, (
+            "Inventory summary endpoint returns 'summary' key but should return 'data'.\n"
+            "Change: return {'success': True, 'summary': ...}\n"
+            "To:     return {'success': True, 'data': ...}"
+        )
 
 
 class TestDependencyVersions:
