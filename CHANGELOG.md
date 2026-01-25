@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `POST /admin/gst/seed` - Seed tables from static config
     - `GET /admin/gst/cache/stats` - View cache statistics
   - Seeding script (`scripts/seed_gst_tables.py`) to migrate from static config
-  - Comprehensive unit tests with regression markers
+  - Local test script (`scripts/test_gst_local.py`) for manual GST verification
+  - Comprehensive unit tests (21 tests) with regression markers
 
 - **GST Integration in Global Catalog** - Products are now classified with GST when added to catalog
   - Auto-suggest GST category from product name during promotion approval
