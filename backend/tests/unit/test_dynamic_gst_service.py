@@ -165,6 +165,9 @@ class TestDynamicGSTService:
 
         service = DynamicGSTService()
 
+        # Invalidate cache first to force DB lookup
+        await service.cache.invalidate_all()
+
         # Mock repository to raise exception
         service.repository.get_all_categories = AsyncMock(side_effect=Exception("DB Error"))
 
@@ -283,15 +286,24 @@ class TestGSTRateChanges:
     async def test_rate_change_reflects_in_category_lookup(self, dynamodb_mock, seeded_gst_tables, gst_rates_table):
         """When admin changes GST rate, new rate should be returned after cache refresh"""
         from app.services.dynamic_gst_service import DynamicGSTService
+        from app.repositories.gst_repository import GSTRepository
 
         import os
         os.environ["VYAPAARAI_ENV"] = "test"
 
+        # Create service and inject repository that uses mocked tables
         service = DynamicGSTService()
+        service.repository = GSTRepository()
+        service.repository.rates_table = gst_rates_table
 
-        # Get initial rate for BISCUITS
+        # Invalidate cache to start fresh
+        await service.cache.invalidate_all()
+
+        # Get initial rate for BISCUITS (from seeded data = 18%)
         categories = await service.get_all_categories()
-        initial_rate = Decimal(str(categories.get("BISCUITS", {}).get("gst_rate", 18)))
+        assert "BISCUITS" in categories
+        initial_rate = Decimal(str(categories["BISCUITS"]["gst_rate"]))
+        assert initial_rate == Decimal("18")
 
         # Simulate admin changing rate in DB
         gst_rates_table.update_item(
@@ -300,28 +312,32 @@ class TestGSTRateChanges:
             ExpressionAttributeValues={":rate": Decimal("12")}
         )
 
-        # Before cache refresh, old rate should still be returned
+        # Before cache refresh, old rate should still be returned (from cache)
         categories_cached = await service.get_all_categories()
-        if "BISCUITS" in categories_cached:
-            assert Decimal(str(categories_cached["BISCUITS"]["gst_rate"])) == initial_rate
+        assert Decimal(str(categories_cached["BISCUITS"]["gst_rate"])) == initial_rate
 
         # After cache refresh, new rate should be returned
-        await service.refresh_cache()
+        await service.cache.invalidate_all()
         categories_new = await service.get_all_categories()
-
-        if "BISCUITS" in categories_new:
-            assert Decimal(str(categories_new["BISCUITS"]["gst_rate"])) == Decimal("12")
+        assert Decimal(str(categories_new["BISCUITS"]["gst_rate"])) == Decimal("12")
 
     @pytest.mark.asyncio
     async def test_new_category_available_after_cache_refresh(self, dynamodb_mock, seeded_gst_tables, gst_rates_table):
         """Newly added category should be available after cache refresh"""
         from app.services.dynamic_gst_service import DynamicGSTService
+        from app.repositories.gst_repository import GSTRepository
         from datetime import datetime
 
         import os
         os.environ["VYAPAARAI_ENV"] = "test"
 
+        # Create service and inject repository that uses mocked tables
         service = DynamicGSTService()
+        service.repository = GSTRepository()
+        service.repository.rates_table = gst_rates_table
+
+        # Invalidate cache to start fresh
+        await service.cache.invalidate_all()
 
         # Initial load
         categories = await service.get_all_categories()
@@ -348,8 +364,8 @@ class TestGSTRateChanges:
         categories_cached = await service.get_all_categories()
         assert "NEW_CATEGORY" not in categories_cached
 
-        # After refresh, should be visible
-        await service.refresh_cache()
+        # After cache invalidation, should be visible
+        await service.cache.invalidate_all()
         categories_new = await service.get_all_categories()
         assert "NEW_CATEGORY" in categories_new
         assert Decimal(str(categories_new["NEW_CATEGORY"]["gst_rate"])) == Decimal("5")
