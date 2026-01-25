@@ -68,5 +68,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"  # Allow extra fields in .env without validation errors
 
 settings = Settings()

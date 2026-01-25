@@ -182,7 +182,49 @@ class DynamoDBSchemas:
         ],
         "BillingMode": "PAY_PER_REQUEST",
     }
-    
+
+    GST_RATES_TABLE = {
+        "TableName": "vyaparai-gst-rates-test",
+        "KeySchema": [
+            {"AttributeName": "category_code", "KeyType": "HASH"},
+        ],
+        "AttributeDefinitions": [
+            {"AttributeName": "category_code", "AttributeType": "S"},
+            {"AttributeName": "gst_rate", "AttributeType": "N"},
+        ],
+        "GlobalSecondaryIndexes": [
+            {
+                "IndexName": "gst-rate-index",
+                "KeySchema": [
+                    {"AttributeName": "gst_rate", "KeyType": "HASH"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    }
+
+    HSN_MAPPINGS_TABLE = {
+        "TableName": "vyaparai-hsn-mappings-test",
+        "KeySchema": [
+            {"AttributeName": "hsn_code", "KeyType": "HASH"},
+        ],
+        "AttributeDefinitions": [
+            {"AttributeName": "hsn_code", "AttributeType": "S"},
+            {"AttributeName": "category_code", "AttributeType": "S"},
+        ],
+        "GlobalSecondaryIndexes": [
+            {
+                "IndexName": "category-index",
+                "KeySchema": [
+                    {"AttributeName": "category_code", "KeyType": "HASH"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    }
+
     @classmethod
     def get_all_schemas(cls) -> List[Dict[str, Any]]:
         """Return all table schemas"""
@@ -193,6 +235,8 @@ class DynamoDBSchemas:
             cls.SESSIONS_TABLE,
             cls.KHATA_TRANSACTIONS_TABLE,
             cls.CUSTOMER_BALANCES_TABLE,
+            cls.GST_RATES_TABLE,
+            cls.HSN_MAPPINGS_TABLE,
         ]
 
 
@@ -592,3 +636,117 @@ def gst_service_mock():
     service.calculate_order_gst = AsyncMock()
 
     return service
+
+
+@pytest.fixture
+def gst_rates_table(dynamodb_resource):
+    """Get GST rates table"""
+    return dynamodb_resource.Table("vyaparai-gst-rates-test")
+
+
+@pytest.fixture
+def hsn_mappings_table(dynamodb_resource):
+    """Get HSN mappings table"""
+    return dynamodb_resource.Table("vyaparai-hsn-mappings-test")
+
+
+@pytest.fixture
+def sample_gst_categories() -> List[Dict[str, Any]]:
+    """Sample GST categories for testing dynamic GST service"""
+    now = datetime.utcnow().isoformat()
+    return [
+        {
+            "category_code": "BISCUITS",
+            "category_name": "Biscuits",
+            "gst_rate": Decimal("18"),
+            "hsn_prefix": "1905",
+            "cess_rate": Decimal("0"),
+            "description": "All types of biscuits and cookies",
+            "keywords": ["biscuit", "cookie", "parle"],
+            "is_active": True,
+            "effective_from": "2026-01-01",
+            "created_at": now,
+            "updated_at": now,
+            "updated_by": "SYSTEM_TEST"
+        },
+        {
+            "category_code": "AERATED",
+            "category_name": "Aerated/Soft Drinks",
+            "gst_rate": Decimal("28"),
+            "hsn_prefix": "2202",
+            "cess_rate": Decimal("12"),
+            "description": "Cola, soda, carbonated beverages",
+            "keywords": ["cola", "pepsi", "coke", "soda"],
+            "is_active": True,
+            "effective_from": "2026-01-01",
+            "created_at": now,
+            "updated_at": now,
+            "updated_by": "SYSTEM_TEST"
+        },
+        {
+            "category_code": "SALT",
+            "category_name": "Salt",
+            "gst_rate": Decimal("5"),
+            "hsn_prefix": "2501",
+            "cess_rate": Decimal("0"),
+            "description": "Table salt, rock salt, iodized salt",
+            "keywords": ["salt", "namak"],
+            "is_active": True,
+            "effective_from": "2026-01-01",
+            "created_at": now,
+            "updated_at": now,
+            "updated_by": "SYSTEM_TEST"
+        },
+    ]
+
+
+@pytest.fixture
+def sample_hsn_mappings() -> List[Dict[str, Any]]:
+    """Sample HSN mappings for testing dynamic GST service"""
+    now = datetime.utcnow().isoformat()
+    return [
+        {
+            "hsn_code": "1905",
+            "category_code": "BISCUITS",
+            "description": "Biscuits, bread",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+            "updated_by": "SYSTEM_TEST"
+        },
+        {
+            "hsn_code": "2202",
+            "category_code": "AERATED",
+            "description": "Aerated beverages",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+            "updated_by": "SYSTEM_TEST"
+        },
+        {
+            "hsn_code": "2501",
+            "category_code": "SALT",
+            "description": "Salt",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+            "updated_by": "SYSTEM_TEST"
+        },
+    ]
+
+
+@pytest.fixture
+def seeded_gst_tables(gst_rates_table, hsn_mappings_table, sample_gst_categories, sample_hsn_mappings):
+    """GST tables with pre-seeded data"""
+    # Seed categories
+    for cat in sample_gst_categories:
+        gst_rates_table.put_item(Item=cat)
+
+    # Seed HSN mappings
+    for mapping in sample_hsn_mappings:
+        hsn_mappings_table.put_item(Item=mapping)
+
+    return {
+        "categories": sample_gst_categories,
+        "hsn_mappings": sample_hsn_mappings
+    }

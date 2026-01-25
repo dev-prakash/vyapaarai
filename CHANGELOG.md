@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-01-25
+
+**Dynamic GST Administration** - Admin can update GST rates without code deployment
+
+### Added
+- **Dynamic GST Reference Tables** - Admin can now update GST rates without code deployment
+  - New DynamoDB tables: `vyaparai-gst-rates-{env}` and `vyaparai-hsn-mappings-{env}`
+  - Repository layer (`gst_repository.py`) for CRUD operations with audit logging
+  - In-memory caching layer (`gst_cache.py`) with 5-minute TTL for performance
+  - Dynamic GST service (`dynamic_gst_service.py`) with DB lookup and static fallback
+  - Admin API endpoints for GST management:
+    - `GET /admin/gst/categories` - List all GST categories
+    - `POST /admin/gst/categories` - Create new category
+    - `PUT /admin/gst/categories/{code}` - Update category (including rate changes)
+    - `DELETE /admin/gst/categories/{code}` - Soft delete category
+    - `GET /admin/gst/hsn` - List HSN mappings
+    - `POST /admin/gst/hsn` - Create HSN mapping
+    - `PUT /admin/gst/hsn/{code}` - Update HSN mapping
+    - `DELETE /admin/gst/hsn/{code}` - Soft delete HSN mapping
+    - `POST /admin/gst/cache/refresh` - Force cache refresh
+    - `POST /admin/gst/seed` - Seed tables from static config
+    - `GET /admin/gst/cache/stats` - View cache statistics
+  - Seeding script (`scripts/seed_gst_tables.py`) to migrate from static config
+  - Local test script (`scripts/test_gst_local.py`) for manual GST verification
+  - Comprehensive unit tests (21 tests) with regression markers
+
+- **GST Integration in Global Catalog** - Products are now classified with GST when added to catalog
+  - Auto-suggest GST category from product name during promotion approval
+  - Admin can assign HSN code, GST rate, cess rate when approving products
+  - GST fields inherited by store inventory on promotion
+  - New admin endpoints for GST management:
+    - `GET /admin/products/gst/categories` - List all GST categories
+    - `GET /admin/products/gst/suggest/{name}` - Get GST suggestion for product
+    - `PUT /admin/products/global/{id}/gst` - Update product GST classification
+    - `GET /admin/products/global/without-gst` - Find products needing GST assignment
+
+### Changed
+- GST service now uses dynamic rate lookup with database-first, static fallback strategy
+- `get_all_gst_categories()`, `get_hsn_info()`, `suggest_gst_category()` are now async methods
+- GST rate priority: store override > product rate > dynamic HSN lookup > static fallback > default 18%
+
+---
+
 ## [0.2.0] - 2026-01-24
 
 **GST Calculation System Release** - India-compliant multi-slab GST

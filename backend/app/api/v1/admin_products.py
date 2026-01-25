@@ -9,7 +9,7 @@ Includes:
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -20,6 +20,14 @@ from datetime import datetime
 import logging
 
 from app.api.v1.admin_auth import get_current_admin_user
+from app.core.gst_config import (
+    GST_CATEGORIES,
+    GSTRate,
+    get_gst_rate_from_hsn,
+    get_default_gst_rate,
+    suggest_category_from_product_name,
+    validate_hsn_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,26 @@ PROMOTION_STATUS_PROMOTED = 'promoted'
 class PromotionRejectRequest(BaseModel):
     """Schema for rejecting a promotion request"""
     reason: str
+
+
+class PromotionApproveRequest(BaseModel):
+    """Schema for approving a promotion request with GST details"""
+    hsn_code: Optional[str] = Field(None, description="HSN code for GST classification")
+    gst_category: Optional[str] = Field(None, description="GST category code (e.g., BISCUITS, TEA_PACKAGED)")
+    gst_rate: Optional[Decimal] = Field(None, description="GST rate override (0, 5, 12, 18, 28)")
+    cess_rate: Optional[Decimal] = Field(default=Decimal("0"), description="Cess rate if applicable")
+    is_gst_exempt: Optional[bool] = Field(default=False, description="Whether product is GST exempt")
+
+
+class GSTSuggestionResponse(BaseModel):
+    """Response for GST suggestion based on product details"""
+    suggested_category: Optional[str] = None
+    suggested_category_name: Optional[str] = None
+    suggested_hsn_code: Optional[str] = None
+    suggested_gst_rate: Decimal = Decimal("18")
+    suggested_cess_rate: Decimal = Decimal("0")
+    confidence: str = "low"  # low, medium, high
+    all_matching_categories: List[Dict[str, Any]] = []
 
 
 def decimal_to_float(obj):
@@ -94,6 +122,92 @@ def parse_dynamodb_value(value: dict):
     elif 'NULL' in value:
         return None
     return None
+
+
+def _get_gst_suggestion(
+    product_name: str,
+    category: str = '',
+    existing_hsn: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Generate GST suggestion based on product name and category.
+
+    Uses multiple strategies:
+    1. If HSN code exists, use it directly
+    2. Try to match product name to known GST categories
+    3. Try to match product category to GST categories
+    4. Fall back to default 18% rate
+    """
+    suggestion = {
+        'suggested_category': None,
+        'suggested_category_name': None,
+        'suggested_hsn_code': existing_hsn,
+        'suggested_gst_rate': float(get_default_gst_rate().value),
+        'suggested_cess_rate': 0.0,
+        'confidence': 'low',
+        'all_matching_categories': []
+    }
+
+    # Strategy 1: Use existing HSN code if valid
+    if existing_hsn and validate_hsn_code(existing_hsn):
+        gst_cat = get_gst_rate_from_hsn(existing_hsn)
+        if gst_cat:
+            suggestion['suggested_category'] = gst_cat.code
+            suggestion['suggested_category_name'] = gst_cat.name
+            suggestion['suggested_hsn_code'] = existing_hsn
+            suggestion['suggested_gst_rate'] = float(gst_cat.gst_rate.value)
+            suggestion['suggested_cess_rate'] = float(gst_cat.cess_rate)
+            suggestion['confidence'] = 'high'
+            return suggestion
+
+    # Strategy 2: Try to match product name
+    if product_name:
+        category_code = suggest_category_from_product_name(product_name)
+        if category_code and category_code in GST_CATEGORIES:
+            gst_cat = GST_CATEGORIES[category_code]
+            suggestion['suggested_category'] = gst_cat.code
+            suggestion['suggested_category_name'] = gst_cat.name
+            suggestion['suggested_hsn_code'] = gst_cat.hsn_prefix
+            suggestion['suggested_gst_rate'] = float(gst_cat.gst_rate.value)
+            suggestion['suggested_cess_rate'] = float(gst_cat.cess_rate)
+            suggestion['confidence'] = 'medium'
+
+    # Strategy 3: Find all potentially matching categories for admin to choose
+    matching_categories = []
+    search_terms = product_name.lower().split() if product_name else []
+
+    for code, cat in GST_CATEGORIES.items():
+        # Check if any search term matches category name or code
+        cat_name_lower = cat.name.lower()
+        if any(term in cat_name_lower or term in code.lower() for term in search_terms):
+            matching_categories.append({
+                'code': cat.code,
+                'name': cat.name,
+                'hsn_prefix': cat.hsn_prefix,
+                'gst_rate': float(cat.gst_rate.value),
+                'cess_rate': float(cat.cess_rate)
+            })
+
+    # Also check product category against GST categories
+    if category:
+        category_lower = category.lower()
+        for code, cat in GST_CATEGORIES.items():
+            if category_lower in cat.name.lower() or category_lower in code.lower():
+                match_exists = any(m['code'] == cat.code for m in matching_categories)
+                if not match_exists:
+                    matching_categories.append({
+                        'code': cat.code,
+                        'name': cat.name,
+                        'hsn_prefix': cat.hsn_prefix,
+                        'gst_rate': float(cat.gst_rate.value),
+                        'cess_rate': float(cat.cess_rate)
+                    })
+
+    # Sort by GST rate for easier review
+    matching_categories.sort(key=lambda x: x['gst_rate'])
+    suggestion['all_matching_categories'] = matching_categories[:10]  # Limit to top 10
+
+    return suggestion
 
 
 @router.get("/global")
@@ -405,6 +519,13 @@ async def get_promotion_request(
 
         quality_score = sum(quality_checks.values()) / len(quality_checks) * 100
 
+        # Generate GST suggestion based on product name and category
+        gst_suggestion = _get_gst_suggestion(
+            product_name=product.get('product_name', ''),
+            category=product.get('category', ''),
+            existing_hsn=product.get('hsn_code')
+        )
+
         return {
             'success': True,
             'product': product,
@@ -412,7 +533,8 @@ async def get_promotion_request(
             'quality_score': round(quality_score, 1),
             'eligible_for_promotion': quality_score >= 60,
             'promotion_status': product.get('promotion_status'),
-            'promotion_request_date': product.get('promotion_request_date')
+            'promotion_request_date': product.get('promotion_request_date'),
+            'gst_suggestion': gst_suggestion
         }
 
     except HTTPException:
@@ -426,15 +548,22 @@ async def get_promotion_request(
 async def approve_promotion(
     store_id: str,
     product_id: str,
+    gst_details: Optional[PromotionApproveRequest] = Body(default=None),
     current_user: dict = Depends(get_current_admin_user)
 ):
     """
-    Approve a promotion request and create a global catalog product
+    Approve a promotion request and create a global catalog product with GST details.
 
     This is a transactional operation that:
-    1. Creates a new product in the global catalog
+    1. Creates a new product in the global catalog with GST classification
     2. Updates the inventory item's promotion status
     3. Links the inventory item to the new global product
+
+    GST Details:
+    - If hsn_code is provided, GST rate is looked up automatically
+    - If gst_category is provided, uses that category's rate
+    - If gst_rate is provided, uses that as override
+    - Falls back to auto-suggestion based on product name
     """
     try:
         # Get the product from inventory
@@ -463,6 +592,56 @@ async def approve_promotion(
         # Generate new global product ID
         global_product_id = f"GLOB_{ulid.new().str}"
 
+        # Determine GST details
+        hsn_code = None
+        gst_category = None
+        gst_rate = get_default_gst_rate().value  # Default 18%
+        cess_rate = Decimal('0')
+        is_gst_exempt = False
+
+        if gst_details:
+            # Use provided GST details
+            if gst_details.hsn_code and validate_hsn_code(gst_details.hsn_code):
+                hsn_code = gst_details.hsn_code
+                # Look up rate from HSN
+                hsn_cat = get_gst_rate_from_hsn(hsn_code)
+                if hsn_cat:
+                    gst_category = hsn_cat.code
+                    gst_rate = hsn_cat.gst_rate.value
+                    cess_rate = Decimal(str(hsn_cat.cess_rate))
+
+            if gst_details.gst_category and gst_details.gst_category in GST_CATEGORIES:
+                gst_category = gst_details.gst_category
+                cat = GST_CATEGORIES[gst_category]
+                if not hsn_code:
+                    hsn_code = cat.hsn_prefix
+                gst_rate = cat.gst_rate.value
+                cess_rate = Decimal(str(cat.cess_rate))
+
+            # Allow explicit rate override
+            if gst_details.gst_rate is not None:
+                gst_rate = gst_details.gst_rate
+
+            if gst_details.cess_rate is not None:
+                cess_rate = gst_details.cess_rate
+
+            if gst_details.is_gst_exempt:
+                is_gst_exempt = True
+                gst_rate = Decimal('0')
+                cess_rate = Decimal('0')
+        else:
+            # Auto-suggest GST based on product name
+            suggestion = _get_gst_suggestion(
+                product_name=item.get('product_name', ''),
+                category=item.get('category', ''),
+                existing_hsn=item.get('hsn_code')
+            )
+            if suggestion['suggested_category']:
+                gst_category = suggestion['suggested_category']
+                hsn_code = suggestion['suggested_hsn_code']
+                gst_rate = Decimal(str(suggestion['suggested_gst_rate']))
+                cess_rate = Decimal(str(suggestion['suggested_cess_rate']))
+
         # Create global catalog product
         now = datetime.utcnow().isoformat() + 'Z'
 
@@ -480,6 +659,13 @@ async def approve_promotion(
                 'original': item.get('image_url', ''),
                 'thumbnail': item.get('image_url', '')
             },
+            # GST fields
+            'hsn_code': hsn_code,
+            'gst_category': gst_category,
+            'gst_rate': gst_rate,
+            'cess_rate': cess_rate,
+            'is_gst_exempt': is_gst_exempt,
+            # Metadata
             'verification_status': 'verified',
             'quality_score': Decimal(str(item.get('quality_score', 70))),
             'stores_using_count': Decimal('1'),
@@ -496,7 +682,7 @@ async def approve_promotion(
             # Create global product
             global_products_table.put_item(Item=global_product)
 
-            # Update inventory item
+            # Update inventory item with GST fields inherited from global product
             store_inventory_table.update_item(
                 Key={
                     'store_id': store_id,
@@ -509,7 +695,12 @@ async def approve_promotion(
                         promotion_approved_by = :approved_by,
                         generic_product_id = :global_id,
                         product_source = :source,
-                        visibility = :visibility
+                        visibility = :visibility,
+                        hsn_code = :hsn_code,
+                        gst_category = :gst_category,
+                        gst_rate = :gst_rate,
+                        cess_rate = :cess_rate,
+                        is_gst_exempt = :is_gst_exempt
                 """,
                 ExpressionAttributeValues={
                     ':status': PROMOTION_STATUS_PROMOTED,
@@ -517,18 +708,33 @@ async def approve_promotion(
                     ':approved_at': now,
                     ':approved_by': current_user.get('user_id', 'admin'),
                     ':source': 'global_catalog',
-                    ':visibility': 'global'
+                    ':visibility': 'global',
+                    ':hsn_code': hsn_code,
+                    ':gst_category': gst_category,
+                    ':gst_rate': gst_rate,
+                    ':cess_rate': cess_rate,
+                    ':is_gst_exempt': is_gst_exempt
                 }
             )
 
-            logger.info(f"Product {product_id} promoted to global catalog as {global_product_id}")
+            logger.info(
+                f"Product {product_id} promoted to global catalog as {global_product_id} "
+                f"with GST: {gst_rate}% (HSN: {hsn_code}, Category: {gst_category})"
+            )
 
             return {
                 'success': True,
-                'message': 'Product promoted to global catalog',
+                'message': 'Product promoted to global catalog with GST classification',
                 'global_product_id': global_product_id,
                 'original_product_id': product_id,
-                'store_id': store_id
+                'store_id': store_id,
+                'gst_details': {
+                    'hsn_code': hsn_code,
+                    'gst_category': gst_category,
+                    'gst_rate': float(gst_rate),
+                    'cess_rate': float(cess_rate),
+                    'is_gst_exempt': is_gst_exempt
+                }
             }
 
         except Exception as tx_error:
@@ -669,3 +875,216 @@ async def get_promotion_queue_stats(
     except Exception as e:
         logger.error(f"Error getting promotion queue stats: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+# =============================================================================
+# GST MANAGEMENT ENDPOINTS FOR ADMIN
+# =============================================================================
+
+@router.get("/gst/categories")
+async def list_gst_categories(
+    rate: Optional[int] = Query(None, description="Filter by GST rate (0, 5, 12, 18, 28)"),
+    search: Optional[str] = Query(None, description="Search in category name"),
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """
+    List all available GST categories for product classification.
+
+    Admin can use this to find appropriate GST category when approving products.
+    """
+    categories = []
+
+    for code, cat in GST_CATEGORIES.items():
+        # Apply rate filter
+        if rate is not None and int(cat.gst_rate.value) != rate:
+            continue
+
+        # Apply search filter
+        if search and search.lower() not in cat.name.lower():
+            continue
+
+        categories.append({
+            'code': cat.code,
+            'name': cat.name,
+            'hsn_prefix': cat.hsn_prefix,
+            'gst_rate': float(cat.gst_rate.value),
+            'cess_rate': float(cat.cess_rate),
+            'description': getattr(cat, 'description', '')
+        })
+
+    # Sort by GST rate, then by name
+    categories.sort(key=lambda x: (x['gst_rate'], x['name']))
+
+    return {
+        'success': True,
+        'categories': categories,
+        'count': len(categories),
+        'rate_summary': {
+            '0%': sum(1 for c in categories if c['gst_rate'] == 0),
+            '5%': sum(1 for c in categories if c['gst_rate'] == 5),
+            '12%': sum(1 for c in categories if c['gst_rate'] == 12),
+            '18%': sum(1 for c in categories if c['gst_rate'] == 18),
+            '28%': sum(1 for c in categories if c['gst_rate'] == 28),
+        }
+    }
+
+
+@router.get("/gst/suggest/{product_name}")
+async def suggest_gst_for_product(
+    product_name: str,
+    category: Optional[str] = Query(None, description="Product category for better suggestion"),
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Get GST suggestion for a product based on its name and category.
+
+    Useful for admin to quickly find appropriate GST classification.
+    """
+    suggestion = _get_gst_suggestion(
+        product_name=product_name,
+        category=category or '',
+        existing_hsn=None
+    )
+
+    return {
+        'success': True,
+        'product_name': product_name,
+        'suggestion': suggestion
+    }
+
+
+@router.put("/global/{product_id}/gst")
+async def update_global_product_gst(
+    product_id: str,
+    gst_details: PromotionApproveRequest = Body(...),
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Update GST details for an existing global catalog product.
+
+    Use this to correct or update GST classification for products already in the catalog.
+    """
+    try:
+        # Verify product exists
+        response = dynamodb_client.get_item(
+            TableName=GLOBAL_PRODUCTS_TABLE,
+            Key={'product_id': {'S': product_id}}
+        )
+
+        if 'Item' not in response:
+            raise HTTPException(status_code=404, detail=f"Product not found: {product_id}")
+
+        # Determine GST values
+        hsn_code = gst_details.hsn_code
+        gst_category = gst_details.gst_category
+        gst_rate = gst_details.gst_rate if gst_details.gst_rate is not None else get_default_gst_rate().value
+        cess_rate = gst_details.cess_rate if gst_details.cess_rate is not None else Decimal('0')
+        is_gst_exempt = gst_details.is_gst_exempt or False
+
+        # If HSN provided, validate and lookup
+        if hsn_code and validate_hsn_code(hsn_code):
+            hsn_cat = get_gst_rate_from_hsn(hsn_code)
+            if hsn_cat and not gst_category:
+                gst_category = hsn_cat.code
+
+        # If category provided, get details
+        if gst_category and gst_category in GST_CATEGORIES:
+            cat = GST_CATEGORIES[gst_category]
+            if not hsn_code:
+                hsn_code = cat.hsn_prefix
+            if gst_details.gst_rate is None:
+                gst_rate = cat.gst_rate.value
+            if gst_details.cess_rate is None:
+                cess_rate = Decimal(str(cat.cess_rate))
+
+        # Handle exempt status
+        if is_gst_exempt:
+            gst_rate = Decimal('0')
+            cess_rate = Decimal('0')
+
+        now = datetime.utcnow().isoformat() + 'Z'
+
+        # Update global product
+        global_products_table.update_item(
+            Key={'product_id': product_id},
+            UpdateExpression="""
+                SET hsn_code = :hsn_code,
+                    gst_category = :gst_category,
+                    gst_rate = :gst_rate,
+                    cess_rate = :cess_rate,
+                    is_gst_exempt = :is_gst_exempt,
+                    gst_updated_at = :updated_at,
+                    gst_updated_by = :updated_by
+            """,
+            ExpressionAttributeValues={
+                ':hsn_code': hsn_code,
+                ':gst_category': gst_category,
+                ':gst_rate': gst_rate,
+                ':cess_rate': cess_rate,
+                ':is_gst_exempt': is_gst_exempt,
+                ':updated_at': now,
+                ':updated_by': current_user.get('user_id', 'admin')
+            }
+        )
+
+        logger.info(f"Updated GST for global product {product_id}: {gst_rate}% (HSN: {hsn_code})")
+
+        return {
+            'success': True,
+            'message': 'GST details updated successfully',
+            'product_id': product_id,
+            'gst_details': {
+                'hsn_code': hsn_code,
+                'gst_category': gst_category,
+                'gst_rate': float(gst_rate),
+                'cess_rate': float(cess_rate),
+                'is_gst_exempt': is_gst_exempt
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating GST for product {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update GST: {str(e)}")
+
+
+@router.get("/global/without-gst")
+async def list_products_without_gst(
+    limit: int = Query(100, ge=1, le=500, description="Number of products to return"),
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """
+    List global products that don't have GST classification.
+
+    Useful for admin to identify products needing GST assignment.
+    """
+    try:
+        # Scan for products without hsn_code or gst_rate
+        response = dynamodb_client.scan(
+            TableName=GLOBAL_PRODUCTS_TABLE,
+            FilterExpression='attribute_not_exists(hsn_code) OR attribute_not_exists(gst_rate)',
+            Limit=limit
+        )
+
+        products = []
+        for item in response.get('Items', []):
+            product = parse_dynamodb_item(item)
+            # Generate suggestion for each product
+            suggestion = _get_gst_suggestion(
+                product_name=product.get('name', ''),
+                category=product.get('category', '')
+            )
+            product['gst_suggestion'] = suggestion
+            products.append(product)
+
+        return {
+            'success': True,
+            'products': products,
+            'count': len(products),
+            'message': f"Found {len(products)} products without GST classification"
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing products without GST: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list products: {str(e)}")

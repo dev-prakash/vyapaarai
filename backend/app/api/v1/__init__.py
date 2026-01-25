@@ -23,6 +23,7 @@ from .notifications import router as notifications_router
 from .payments import router as payments_router
 from .khata import router as khata_router
 from .gst import router as gst_router
+from .admin_gst import router as admin_gst_router
 
 # Create main v1 router
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -46,6 +47,7 @@ api_v1_router.include_router(notifications_router)
 api_v1_router.include_router(payments_router, prefix="/payments", tags=["Payments"])
 api_v1_router.include_router(khata_router)
 api_v1_router.include_router(gst_router)
+api_v1_router.include_router(admin_gst_router)
 
 # Export the main router
 __all__ = ["api_v1_router"]
