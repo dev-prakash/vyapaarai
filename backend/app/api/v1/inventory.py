@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 import json
@@ -138,12 +138,17 @@ class CustomProductCreate(BaseModel):
 
 class CustomProductUpdate(BaseModel):
     """Schema for updating a store-specific custom product"""
+    model_config = ConfigDict(extra='ignore')  # Ignore extra fields from frontend
+
     product_name: Optional[str] = None
     brand: Optional[str] = None
+    brand_name: Optional[str] = None
+    brand_id: Optional[str] = None
     category: Optional[str] = None
     subcategory: Optional[str] = None
     description: Optional[str] = None
     barcode: Optional[str] = None
+    sku: Optional[str] = None
 
     selling_price: Optional[float] = None
     cost_price: Optional[float] = None
@@ -154,11 +159,18 @@ class CustomProductUpdate(BaseModel):
     current_stock: Optional[int] = None
     min_stock_level: Optional[int] = None
     max_stock_level: Optional[int] = None
+    reorder_point: Optional[int] = None
+    reorder_quantity: Optional[int] = None
     unit: Optional[str] = None
+    size: Optional[float] = None
+    size_unit: Optional[str] = None
+    variant_type: Optional[str] = None
+    location: Optional[str] = None
 
     is_active: Optional[bool] = None
     is_returnable: Optional[bool] = None
     is_perishable: Optional[bool] = None
+    status: Optional[str] = None
 
     image: Optional[str] = None
     image_urls: Optional[Dict[str, str]] = None
