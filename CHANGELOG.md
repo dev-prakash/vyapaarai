@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-01-24
+
+**GST Calculation System Release** - India-compliant multi-slab GST
+
 ### Added
 - **Complete GST Calculation System** - India-compliant multi-slab GST with CGST/SGST breakdown
   - 5 GST rate slabs: 0%, 5%, 12%, 18%, 28% with optional cess
