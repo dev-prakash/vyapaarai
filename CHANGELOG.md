@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **GST Integration in Global Catalog** - Products are now classified with GST when added to catalog
+  - Auto-suggest GST category from product name during promotion approval
+  - Admin can assign HSN code, GST rate, cess rate when approving products
+  - GST fields inherited by store inventory on promotion
+  - New admin endpoints for GST management:
+    - `GET /admin/products/gst/categories` - List all GST categories
+    - `GET /admin/products/gst/suggest/{name}` - Get GST suggestion for product
+    - `PUT /admin/products/global/{id}/gst` - Update product GST classification
+    - `GET /admin/products/global/without-gst` - Find products needing GST assignment
+
 ---
 
 ## [0.2.0] - 2026-01-24
