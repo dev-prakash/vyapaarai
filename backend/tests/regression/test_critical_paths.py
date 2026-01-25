@@ -313,6 +313,93 @@ class TestFastAPIRouteConfiguration:
                             )
 
 
+class TestInventoryEndpoints:
+    """
+    CRITICAL: Test that inventory endpoints exist and are correctly configured.
+
+    This catches issues like missing PUT endpoints for product updates.
+    """
+
+    @pytest.mark.regression
+    def test_inventory_router_syntax_valid(self):
+        """
+        CRITICAL: Verify inventory router file has valid Python syntax.
+        """
+        import ast
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        try:
+            ast.parse(source)
+        except SyntaxError as e:
+            pytest.fail(f"Syntax error in inventory.py: {e}")
+
+    @pytest.mark.regression
+    def test_inventory_put_products_endpoint_exists(self):
+        """
+        CRITICAL: Verify PUT /products/{product_id} endpoint exists.
+
+        This caught the 404 bug on 2026-01-25 when editing products.
+        Frontend calls PUT /api/v1/inventory/products/{productId} but
+        this endpoint was missing from the backend.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for PUT /products/{product_id} endpoint
+        # Pattern: @router.put("/products/{product_id}")
+        put_pattern = r'@router\.put\s*\(\s*["\']\/products\/\{product_id\}["\']'
+        match = re.search(put_pattern, source)
+
+        assert match is not None, (
+            "Missing PUT /products/{product_id} endpoint in inventory.py.\n"
+            "Frontend requires this endpoint for editing products.\n"
+            "Add @router.put('/products/{product_id}') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_inventory_has_all_required_endpoints(self):
+        """
+        CRITICAL: Verify all required inventory endpoints exist.
+
+        Frontend requires:
+        - GET /products - list products
+        - POST /products/custom - add custom product
+        - POST /products/from-catalog - add product from catalog
+        - PUT /products/{product_id} - update product
+        - DELETE /products/custom/{product_id} - delete custom product
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        required_endpoints = [
+            (r'@router\.get\s*\(\s*["\']\/products["\']', 'GET /products'),
+            (r'@router\.post\s*\(\s*["\']\/products\/custom["\']', 'POST /products/custom'),
+            (r'@router\.put\s*\(\s*["\']\/products\/\{product_id\}["\']', 'PUT /products/{product_id}'),
+        ]
+
+        missing = []
+        for pattern, endpoint_name in required_endpoints:
+            if not re.search(pattern, source):
+                missing.append(endpoint_name)
+
+        assert not missing, (
+            f"Missing required inventory endpoints: {', '.join(missing)}\n"
+            "These endpoints are required for frontend product management."
+        )
+
+
 class TestDependencyVersions:
     """Test that critical dependencies are compatible versions"""
 

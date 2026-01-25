@@ -255,6 +255,70 @@ async def update_stock(store_id: str, product_id: str, stock_update: StockUpdate
         raise HTTPException(status_code=500, detail=f"Stock update failed: {str(e)}")
 
 
+@router.put("/products/{product_id}")
+async def update_product(
+    product_id: str,
+    updates: CustomProductUpdate,
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Update a product in the store's inventory.
+
+    This endpoint handles updates for both custom products and products
+    added from the global catalog.
+
+    Requires store owner authentication.
+    """
+    try:
+        store_id = current_user.get('store_id')
+        user_id = current_user.get('user_id')
+
+        if not store_id:
+            raise HTTPException(status_code=400, detail="Store ID not found in token")
+
+        # Filter out None values from updates
+        update_dict = {k: v for k, v in updates.dict().items() if v is not None}
+
+        if not update_dict:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        # First check if product exists
+        existing_product = await inventory_service.get_product(store_id, product_id)
+        if not existing_product:
+            raise HTTPException(status_code=404, detail=f"Product {product_id} not found in store inventory")
+
+        # Use the update_custom_product method which handles both custom and catalog products
+        result = await inventory_service.update_custom_product(
+            store_id=store_id,
+            product_id=product_id,
+            user_id=user_id,
+            updates=update_dict
+        )
+
+        if not result.get('success'):
+            error_msg = result.get('error', 'Failed to update product')
+            if 'Not authorized' in error_msg:
+                raise HTTPException(status_code=403, detail=error_msg)
+            elif 'not found' in error_msg.lower():
+                raise HTTPException(status_code=404, detail=error_msg)
+            elif 'Cannot update' in error_msg:
+                raise HTTPException(status_code=400, detail=error_msg)
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
+
+        return {
+            "success": True,
+            "message": "Product updated successfully",
+            "product": result.get('product')
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating product {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update product: {str(e)}")
+
+
 @router.get("/products/{store_id}/{product_id}/availability")
 async def check_availability(store_id: str, product_id: str, quantity: int = Query(..., ge=1)):
     """Check product availability for given quantity"""
