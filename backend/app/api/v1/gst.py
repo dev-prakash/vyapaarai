@@ -8,7 +8,7 @@ Author: DevPrakash
 from decimal import Decimal
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from app.models.gst import (
     CalculateItemGSTRequest,
@@ -56,7 +56,7 @@ async def get_gst_categories():
     description="Returns GST categories filtered by tax rate"
 )
 async def get_gst_categories_by_rate(
-    rate: int = Query(
+    rate: int = Path(
         ...,
         description="GST rate (0, 5, 12, 18, or 28)"
     )

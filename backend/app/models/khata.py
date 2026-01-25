@@ -93,7 +93,7 @@ class CreditSaleRequest(BaseModel):
     """Request to record a credit sale"""
     customer_phone: str = Field(
         ...,
-        regex=r'^\+?[1-9]\d{9,14}$',
+        pattern=r'^\+?[1-9]\d{9,14}$',
         description="Customer phone number (e.g., +919876543210)"
     )
     customer_name: Optional[str] = Field(
@@ -162,7 +162,7 @@ class PaymentRequest(BaseModel):
     """Request to record a payment"""
     customer_phone: str = Field(
         ...,
-        regex=r'^\+?[1-9]\d{9,14}$',
+        pattern=r'^\+?[1-9]\d{9,14}$',
         description="Customer phone number"
     )
     amount: Decimal = Field(
@@ -218,7 +218,7 @@ class BalanceAdjustmentRequest(BaseModel):
     """Request to adjust customer balance"""
     customer_phone: str = Field(
         ...,
-        regex=r'^\+?[1-9]\d{9,14}$',
+        pattern=r'^\+?[1-9]\d{9,14}$',
         description="Customer phone number"
     )
     amount: Decimal = Field(
@@ -295,7 +295,7 @@ class CreateCustomerRequest(BaseModel):
     """Request to create a new credit customer"""
     phone: str = Field(
         ...,
-        regex=r'^\+?[1-9]\d{9,14}$',
+        pattern=r'^\+?[1-9]\d{9,14}$',
         description="Customer phone number"
     )
     name: str = Field(
@@ -312,7 +312,7 @@ class CreateCustomerRequest(BaseModel):
     )
     preferred_language: str = Field(
         default="hi",
-        regex=r'^[a-z]{2}$',
+        pattern=r'^[a-z]{2}$',
         description="Preferred language code (ISO 639-1)"
     )
     reminder_enabled: bool = Field(
@@ -377,7 +377,7 @@ class CreateReminderRequest(BaseModel):
     """Request to create a payment reminder"""
     customer_phone: str = Field(
         ...,
-        regex=r'^\+?[1-9]\d{9,14}$',
+        pattern=r'^\+?[1-9]\d{9,14}$',
         description="Customer phone number"
     )
     scheduled_at: Optional[datetime] = Field(
