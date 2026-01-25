@@ -15,6 +15,8 @@ import asyncio
 import logging
 import os
 import uuid
+import time
+import threading
 from datetime import datetime
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
@@ -23,6 +25,108 @@ from botocore.exceptions import ClientError
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== IN-MEMORY CACHE ====================
+# Cache for inventory summary to reduce DynamoDB queries
+# Persists across Lambda warm invocations for low-cost performance boost
+
+class InventorySummaryCache:
+    """
+    Thread-safe in-memory cache for inventory summaries.
+
+    Uses TTL-based expiration to ensure data freshness while
+    reducing DynamoDB read operations.
+    """
+
+    def __init__(self, default_ttl: int = 60):
+        """
+        Initialize cache with default TTL.
+
+        Args:
+            default_ttl: Time-to-live in seconds (default 60s)
+        """
+        self._cache: Dict[str, Dict] = {}
+        self._timestamps: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self.default_ttl = default_ttl
+
+    def get(self, store_id: str) -> Optional[Dict]:
+        """
+        Get cached summary for a store if not expired.
+
+        Args:
+            store_id: Store ID to lookup
+
+        Returns:
+            Cached summary dict or None if not found/expired
+        """
+        with self._lock:
+            if store_id not in self._cache:
+                return None
+
+            # Check if expired
+            cached_time = self._timestamps.get(store_id, 0)
+            if time.time() - cached_time > self.default_ttl:
+                # Expired - remove from cache
+                del self._cache[store_id]
+                del self._timestamps[store_id]
+                logger.debug(f"Cache expired for store {store_id}")
+                return None
+
+            logger.debug(f"Cache hit for store {store_id}")
+            return self._cache[store_id].copy()
+
+    def set(self, store_id: str, summary: Dict) -> None:
+        """
+        Cache a summary for a store.
+
+        Args:
+            store_id: Store ID
+            summary: Summary data to cache
+        """
+        with self._lock:
+            self._cache[store_id] = summary.copy()
+            self._timestamps[store_id] = time.time()
+            logger.debug(f"Cached summary for store {store_id}")
+
+    def invalidate(self, store_id: str) -> None:
+        """
+        Invalidate cache for a specific store.
+
+        Args:
+            store_id: Store ID to invalidate
+        """
+        with self._lock:
+            if store_id in self._cache:
+                del self._cache[store_id]
+                del self._timestamps[store_id]
+                logger.debug(f"Cache invalidated for store {store_id}")
+
+    def invalidate_all(self) -> None:
+        """Clear all cached entries."""
+        with self._lock:
+            self._cache.clear()
+            self._timestamps.clear()
+            logger.debug("All cache entries invalidated")
+
+    def stats(self) -> Dict:
+        """Get cache statistics."""
+        with self._lock:
+            now = time.time()
+            active_entries = sum(
+                1 for store_id in self._cache
+                if now - self._timestamps.get(store_id, 0) <= self.default_ttl
+            )
+            return {
+                "total_entries": len(self._cache),
+                "active_entries": active_entries,
+                "ttl_seconds": self.default_ttl
+            }
+
+
+# Global cache instance (persists across Lambda warm invocations)
+_inventory_summary_cache = InventorySummaryCache(default_ttl=60)
 
 # Product source types
 PRODUCT_SOURCE_GLOBAL = 'global_catalog'
@@ -307,6 +411,9 @@ class InventoryService:
                             f"Reason: {reason or 'Not specified'}"
                         )
 
+                        # Invalidate cache after stock change
+                        self.invalidate_summary_cache(store_id)
+
                         return {
                             "success": True,
                             "previous_stock": previous_stock,
@@ -363,6 +470,9 @@ class InventoryService:
                         f"{previous_stock} → {new_stock} ({quantity_change:+d}) | "
                         f"Reason: {reason or 'Not specified'}"
                     )
+
+                    # Invalidate cache after stock change
+                    self.invalidate_summary_cache(store_id)
 
                     return {
                         "success": True,
@@ -493,6 +603,9 @@ class InventoryService:
                 f"Bulk stock update (transactional): {len(items)} items in {store_id} | "
                 f"Reason: {reason or 'Not specified'}"
             )
+
+            # Invalidate cache after bulk stock change
+            self.invalidate_summary_cache(store_id)
 
             return {
                 "success": True,
@@ -641,15 +754,29 @@ class InventoryService:
             logger.error(f"Error searching by barcode: {e}")
             return None
 
-    async def get_inventory_summary(self, store_id: str) -> Dict:
+    async def get_inventory_summary(self, store_id: str, skip_cache: bool = False) -> Dict:
         """
-        Get inventory summary statistics for a store
+        Get inventory summary statistics for a store.
+
+        Uses in-memory caching with 60s TTL to reduce DynamoDB queries.
+        Cache persists across Lambda warm invocations for better performance.
 
         Args:
             store_id: Store ID
+            skip_cache: If True, bypass cache and fetch fresh data
+
+        Returns:
+            Dict with inventory summary statistics
         """
         if self.use_mock:
             return self._get_mock_summary()
+
+        # Try cache first (unless skip_cache is True)
+        if not skip_cache:
+            cached_summary = _inventory_summary_cache.get(store_id)
+            if cached_summary:
+                logger.info(f"Returning cached inventory summary for store {store_id}")
+                return cached_summary
 
         try:
             # Query all products for store
@@ -674,7 +801,7 @@ class InventoryService:
                 for p in products
             )
 
-            return {
+            summary = {
                 "total_products": total_products,
                 "active_products": active_products,
                 "out_of_stock": out_of_stock,
@@ -682,9 +809,30 @@ class InventoryService:
                 "total_stock_value": round(total_value, 2)
             }
 
+            # Cache the result
+            _inventory_summary_cache.set(store_id, summary)
+            logger.info(f"Fetched and cached inventory summary for store {store_id}")
+
+            return summary
+
         except Exception as e:
             logger.error(f"Error getting inventory summary: {e}")
             return self._get_mock_summary()
+
+    def invalidate_summary_cache(self, store_id: str) -> None:
+        """
+        Invalidate the cached inventory summary for a store.
+
+        Call this after stock updates to ensure fresh data on next request.
+
+        Args:
+            store_id: Store ID to invalidate
+        """
+        _inventory_summary_cache.invalidate(store_id)
+
+    def get_cache_stats(self) -> Dict:
+        """Get cache statistics for monitoring."""
+        return _inventory_summary_cache.stats()
 
     async def _get_global_product(self, product_id: str) -> Optional[Dict]:
         """Internal method to get global product data"""
@@ -829,6 +977,9 @@ class InventoryService:
                 f"Name: {product_item['product_name']} | Created by: {user_id}"
             )
 
+            # Invalidate cache after creating new product
+            self.invalidate_summary_cache(store_id)
+
             return {
                 "success": True,
                 "product_id": product_id,
@@ -960,6 +1111,11 @@ class InventoryService:
                 f"Updated by: {user_id} | Fields: {list(updates.keys())}"
             )
 
+            # Invalidate cache if stock or price changed (affects summary)
+            stock_or_price_fields = {'current_stock', 'selling_price', 'is_active'}
+            if stock_or_price_fields & set(updates.keys()):
+                self.invalidate_summary_cache(store_id)
+
             return {
                 "success": True,
                 "product": decimal_to_float(updated_product),
@@ -1024,6 +1180,9 @@ class InventoryService:
                     f"Deleted by: {user_id}"
                 )
 
+                # Invalidate cache after product deletion
+                self.invalidate_summary_cache(store_id)
+
                 return {
                     "success": True,
                     "message": "Product permanently deleted",
@@ -1046,6 +1205,9 @@ class InventoryService:
                     f"Custom product soft deleted: {product_id} from store {store_id} | "
                     f"Deleted by: {user_id}"
                 )
+
+                # Invalidate cache after product deactivation
+                self.invalidate_summary_cache(store_id)
 
                 return {
                     "success": True,
@@ -1446,6 +1608,9 @@ class InventoryService:
                 f"Product added from global catalog: {global_product_id} to store {store_id} | "
                 f"Added by: {user_id}"
             )
+
+            # Invalidate cache after adding new product
+            self.invalidate_summary_cache(store_id)
 
             return {
                 "success": True,

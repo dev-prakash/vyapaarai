@@ -386,11 +386,18 @@ async def get_product_by_barcode(barcode: str):
 
 
 @router.get("/summary")
-async def get_inventory_summary(store_id: str = Query(..., description="Store ID")):
-    """Get inventory summary statistics"""
+async def get_inventory_summary(
+    store_id: str = Query(..., description="Store ID"),
+    skip_cache: bool = Query(False, description="Bypass cache and fetch fresh data")
+):
+    """
+    Get inventory summary statistics.
 
+    Uses in-memory caching (60s TTL) to improve performance.
+    Set skip_cache=true to force fresh data from DynamoDB.
+    """
     try:
-        summary = await inventory_service.get_inventory_summary(store_id)
+        summary = await inventory_service.get_inventory_summary(store_id, skip_cache=skip_cache)
 
         # Map field names to match frontend expectations
         return {
@@ -402,10 +409,47 @@ async def get_inventory_summary(store_id: str = Query(..., description="Store ID
                 "low_stock_count": summary.get("low_stock", 0),
                 "out_of_stock_count": summary.get("out_of_stock", 0),
                 "store_id": store_id
-            }
+            },
+            "cached": not skip_cache  # Indicator for debugging
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get inventory summary: {str(e)}")
+
+
+@router.get("/cache/stats")
+async def get_cache_stats():
+    """
+    Get inventory summary cache statistics for monitoring.
+
+    Returns information about cache entries, TTL, and hit rates.
+    """
+    try:
+        stats = inventory_service.get_cache_stats()
+        return {
+            "success": True,
+            "cache_stats": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
+
+
+@router.post("/cache/invalidate")
+async def invalidate_cache(
+    store_id: str = Query(..., description="Store ID to invalidate cache for")
+):
+    """
+    Manually invalidate the cache for a specific store.
+
+    Useful after bulk operations or if cache needs to be forcibly refreshed.
+    """
+    try:
+        inventory_service.invalidate_summary_cache(store_id)
+        return {
+            "success": True,
+            "message": f"Cache invalidated for store {store_id}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to invalidate cache: {str(e)}")
 
 
 @router.get("/categories")
