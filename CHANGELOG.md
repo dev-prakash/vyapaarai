@@ -8,9 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Complete GST Calculation System** - India-compliant multi-slab GST with CGST/SGST breakdown
+  - 5 GST rate slabs: 0%, 5%, 12%, 18%, 28% with optional cess
+  - 55+ GST categories covering all kirana/retail items
+  - 80+ HSN code mappings for automatic rate lookup
+  - CGST/SGST split for intra-state, IGST for inter-state transactions
+  - Rate-wise summary for GST filing compliance
+  - Store-level GST rate overrides
+  - Automatic category suggestion from product names
+- GST API endpoints (`/api/v1/gst/*`) for categories, HSN lookup, and calculations
+- GST fields in product operations (HSN code, GST rate, cess rate, exempt flag)
+- GST test fixtures and 40+ unit tests with regression markers
 - Regression tests for store registration address fields (E2E with Playwright)
 
 ### Changed
+- **Cart API**: Now uses GST service for accurate tax calculation (replaces hardcoded 5%)
+- **Orders API**: Now uses GST service with full CGST/SGST breakdown (replaces hardcoded 5%)
 - Store registration: State dropdown now appears before City (consistent with customer registration)
 - Store registration: City field now uses Autocomplete filtered by selected state
 - Store registration: Delivery radius max increased from 20km to 100km
