@@ -777,8 +777,15 @@ class InventoryService:
                 'selling_price': Decimal(str(product_data.get('selling_price', 0))),
                 'cost_price': Decimal(str(product_data.get('cost_price', 0))),
                 'mrp': Decimal(str(product_data.get('mrp', 0))),
-                'tax_rate': Decimal(str(product_data.get('tax_rate', 5))),
+                'tax_rate': Decimal(str(product_data.get('tax_rate', 18))),
                 'discount_percentage': Decimal(str(product_data.get('discount_percentage', 0))),
+
+                # GST fields
+                'hsn_code': product_data.get('hsn_code', ''),
+                'gst_rate': Decimal(str(product_data.get('gst_rate', 18))),
+                'cess_rate': Decimal(str(product_data.get('cess_rate', 0))),
+                'is_gst_exempt': product_data.get('is_gst_exempt', False),
+                'gst_category': product_data.get('gst_category', ''),
 
                 # Inventory
                 'current_stock': int(product_data.get('current_stock', 0)),
@@ -886,13 +893,15 @@ class InventoryService:
             expression_values = {}
             expression_names = {}
 
-            # Allowed fields to update
+            # Allowed fields to update (includes GST fields)
             allowed_fields = {
                 'product_name', 'brand', 'category', 'subcategory', 'description',
                 'barcode', 'selling_price', 'cost_price', 'mrp', 'tax_rate',
                 'discount_percentage', 'current_stock', 'min_stock_level',
                 'max_stock_level', 'unit', 'is_active', 'is_returnable',
-                'is_perishable', 'image', 'image_urls'
+                'is_perishable', 'image', 'image_urls',
+                # GST fields
+                'hsn_code', 'gst_rate', 'cess_rate', 'is_gst_exempt', 'gst_category'
             }
 
             for field, value in updates.items():
@@ -900,7 +909,8 @@ class InventoryService:
                     continue
 
                 # Convert numeric fields to Decimal
-                if field in {'selling_price', 'cost_price', 'mrp', 'tax_rate', 'discount_percentage'}:
+                if field in {'selling_price', 'cost_price', 'mrp', 'tax_rate', 'discount_percentage',
+                             'gst_rate', 'cess_rate'}:
                     value = Decimal(str(value)) if value is not None else Decimal('0')
                 elif field in {'current_stock', 'min_stock_level', 'max_stock_level'}:
                     value = int(value) if value is not None else 0

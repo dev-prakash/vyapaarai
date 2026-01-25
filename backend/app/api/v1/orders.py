@@ -29,6 +29,7 @@ from app.services.order_transaction_service import (
     get_order_transaction_service
 )
 from app.services.notification_service import notification_service
+from app.services.gst_service import gst_service
 from app.models.order import Order, OrderStatus, PaymentStatus, PaymentMethod
 from app.database.hybrid_db import HybridDatabase, OrderData, HybridOrderResult
 from app.core.security import (
@@ -1322,12 +1323,33 @@ async def create_order_with_payment(
         # Generate order ID
         order_id = f"ORD{uuid.uuid4().hex[:8].upper()}"
 
-        # Calculate order totals
+        # Calculate order totals with GST
         subtotal = sum(item.quantity * item.unit_price for item in order_data.items)
-        tax_rate = 0.05  # 5% GST
-        tax_amount = subtotal * tax_rate
+
+        # Use GST service for proper tax calculation
+        try:
+            gst_items = [
+                {
+                    'product_id': item.product_id,
+                    'quantity': item.quantity,
+                    'unit_price': Decimal(str(item.unit_price)),
+                    'product_name': item.product_name
+                }
+                for item in order_data.items
+            ]
+            gst_summary = await gst_service.calculate_order_gst(
+                store_id=order_data.store_id,
+                items=gst_items
+            )
+            tax_amount = float(gst_summary.tax_total)
+            logger.info(f"GST calculated: subtotal={gst_summary.subtotal}, tax={tax_amount}")
+        except Exception as e:
+            # Fallback to default 18% if GST service fails
+            logger.warning(f"GST service error, using default 18%: {e}")
+            tax_amount = float(subtotal * Decimal('0.18'))
+
         delivery_fee = 20 if subtotal < 200 else 0
-        total_amount = subtotal + tax_amount + delivery_fee
+        total_amount = float(subtotal) + tax_amount + delivery_fee
 
         # Convert items to JSON
         items_json = json.dumps([item.dict() for item in order_data.items])
@@ -1805,20 +1827,64 @@ async def get_store_orders(
         raise HTTPException(status_code=500, detail=f"Failed to get orders: {str(e)}")
 
 @router.post("/calculate-total")
-async def calculate_order_total(items: List[OrderItemRequest], tax_rate: float = 0.05, delivery_fee: float = 20.0):
-    """Calculate order total with tax and delivery"""
-    
+async def calculate_order_total(
+    items: List[OrderItemRequest],
+    store_id: Optional[str] = Query(None, description="Store ID for GST calculation"),
+    tax_rate: float = Query(0.18, description="Fallback tax rate if GST service unavailable"),
+    delivery_fee: float = 20.0
+):
+    """Calculate order total with GST and delivery
+
+    Uses GST service for accurate tax calculation when store_id is provided.
+    Falls back to tax_rate parameter if GST service is unavailable.
+    """
+
     try:
         subtotal = sum(item.quantity * item.unit_price for item in items)
-        tax_amount = subtotal * tax_rate
+
+        # Use GST service if store_id provided
+        gst_breakdown = None
+        if store_id:
+            try:
+                gst_items = [
+                    {
+                        'product_id': item.product_id or f"item_{i}",
+                        'quantity': item.quantity,
+                        'unit_price': Decimal(str(item.unit_price)),
+                        'product_name': item.product_name or ''
+                    }
+                    for i, item in enumerate(items)
+                ]
+                gst_summary = await gst_service.calculate_order_gst(
+                    store_id=store_id,
+                    items=gst_items
+                )
+                tax_amount = float(gst_summary.tax_total)
+                gst_breakdown = {
+                    "cgst_total": float(gst_summary.cgst_total),
+                    "sgst_total": float(gst_summary.sgst_total),
+                    "rate_wise_summary": [
+                        {
+                            "gst_rate": float(r.gst_rate),
+                            "taxable_amount": float(r.taxable_amount),
+                            "tax_amount": float(r.total_tax)
+                        }
+                        for r in gst_summary.rate_wise_summary
+                    ]
+                }
+            except Exception as e:
+                logger.warning(f"GST service error, using fallback rate: {e}")
+                tax_amount = subtotal * tax_rate
+        else:
+            tax_amount = subtotal * tax_rate
+
         total_delivery_fee = delivery_fee if subtotal < 200 else 0
         total_amount = subtotal + tax_amount + total_delivery_fee
-        
-        return {
+
+        response = {
             "success": True,
             "subtotal": subtotal,
             "tax_amount": tax_amount,
-            "tax_rate": tax_rate,
             "delivery_fee": total_delivery_fee,
             "total_amount": total_amount,
             "breakdown": {
@@ -1829,6 +1895,11 @@ async def calculate_order_total(items: List[OrderItemRequest], tax_rate: float =
                 "total": total_amount
             }
         }
+
+        if gst_breakdown:
+            response["gst_breakdown"] = gst_breakdown
+
+        return response
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to calculate total: {str(e)}")

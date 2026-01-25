@@ -12,6 +12,8 @@ from decimal import Decimal
 import uuid
 import logging
 
+from app.services.gst_service import gst_service
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cart", tags=["cart"])
@@ -136,13 +138,33 @@ async def add_to_cart(
             }
             items.append(new_item)
         
-        # Calculate totals
+        # Calculate totals with GST
         subtotal = sum(Decimal(str(item['item_total'])) for item in items)
         item_count = sum(item['quantity'] for item in items)
         delivery_fee = Decimal('0') if subtotal >= 500 else Decimal('20')
-        tax = (subtotal * Decimal('0.05')).quantize(Decimal('0.01'))
+
+        # Use GST service for accurate tax calculation
+        try:
+            gst_items = [
+                {
+                    'product_id': item['product_id'],
+                    'quantity': item['quantity'],
+                    'unit_price': Decimal(str(item['unit_price'])),
+                    'product_name': item.get('product_name', '')
+                }
+                for item in items
+            ]
+            gst_summary = await gst_service.calculate_order_gst(
+                store_id=request.store_id,
+                items=gst_items
+            )
+            tax = gst_summary.tax_total
+        except Exception as e:
+            logger.warning(f"GST service error, using default 18%: {e}")
+            tax = (subtotal * Decimal('0.18')).quantize(Decimal('0.01'))
+
         total = subtotal + delivery_fee + tax
-        
+
         # Save cart with TTL (7 days)
         ttl = int((datetime.utcnow() + timedelta(days=7)).timestamp())
         
@@ -274,13 +296,33 @@ async def update_cart_item(
             item['quantity'] = request.quantity
             item['item_total'] = Decimal(str(item['unit_price'])) * request.quantity
         
-        # Recalculate totals
+        # Recalculate totals with GST
         subtotal = sum(Decimal(str(i['item_total'])) for i in items)
         item_count = sum(i['quantity'] for i in items)
         delivery_fee = Decimal('0') if subtotal >= 500 else Decimal('20')
-        tax = (subtotal * Decimal('0.05')).quantize(Decimal('0.01'))
+
+        # Use GST service for accurate tax calculation
+        try:
+            gst_items = [
+                {
+                    'product_id': i['product_id'],
+                    'quantity': i['quantity'],
+                    'unit_price': Decimal(str(i['unit_price'])),
+                    'product_name': i.get('product_name', '')
+                }
+                for i in items
+            ]
+            gst_summary = await gst_service.calculate_order_gst(
+                store_id=store_id,
+                items=gst_items
+            )
+            tax = gst_summary.tax_total
+        except Exception as e:
+            logger.warning(f"GST service error, using default 18%: {e}")
+            tax = (subtotal * Decimal('0.18')).quantize(Decimal('0.01'))
+
         total = subtotal + delivery_fee + tax
-        
+
         # Update cart
         ttl = int((datetime.utcnow() + timedelta(days=7)).timestamp())
         

@@ -447,3 +447,148 @@ def seeded_order(orders_table, sample_order):
     """Order with pre-seeded data"""
     orders_table.put_item(Item=sample_order)
     return sample_order
+
+
+# ============== GST FIXTURES ==============
+
+@pytest.fixture
+def sample_gst_product() -> Dict[str, Any]:
+    """Sample product with GST fields"""
+    return {
+        "store_id": "STR-TEST001",
+        "product_id": "PROD-GST001",
+        "product_name": "Tata Tea Gold 500g",
+        "brand": "Tata",
+        "category": "Beverages",
+        "selling_price": Decimal("250.00"),
+        "cost_price": Decimal("200.00"),
+        "mrp": Decimal("275.00"),
+        "hsn_code": "0902",
+        "gst_rate": Decimal("5"),
+        "cess_rate": Decimal("0"),
+        "is_gst_exempt": False,
+        "gst_category": "TEA",
+        "tax_rate": Decimal("5"),
+        "current_stock": 100,
+        "min_stock_level": 10,
+        "max_stock_level": 500,
+        "unit": "pack",
+        "is_active": True,
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+
+
+@pytest.fixture
+def sample_gst_products() -> List[Dict[str, Any]]:
+    """Sample products at different GST rate slabs for testing"""
+    now = datetime.utcnow().isoformat()
+    return [
+        # 0% - Essentials (Fresh Rice)
+        {
+            "store_id": "STR-TEST001",
+            "product_id": "PROD-GST-0",
+            "product_name": "Fresh Rice 1kg",
+            "brand": "Local",
+            "category": "Grains",
+            "selling_price": Decimal("50.00"),
+            "hsn_code": "1006",
+            "gst_rate": Decimal("0"),
+            "cess_rate": Decimal("0"),
+            "is_gst_exempt": False,
+            "gst_category": "GRAINS",
+            "current_stock": 200,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now
+        },
+        # 5% - Basic packaged (Tata Salt)
+        {
+            "store_id": "STR-TEST001",
+            "product_id": "PROD-GST-5",
+            "product_name": "Tata Salt 1kg",
+            "brand": "Tata",
+            "category": "Essentials",
+            "selling_price": Decimal("25.00"),
+            "hsn_code": "2501",
+            "gst_rate": Decimal("5"),
+            "cess_rate": Decimal("0"),
+            "is_gst_exempt": False,
+            "gst_category": "SALT",
+            "current_stock": 150,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now
+        },
+        # 12% - Processed (Amul Butter)
+        {
+            "store_id": "STR-TEST001",
+            "product_id": "PROD-GST-12",
+            "product_name": "Amul Butter 500g",
+            "brand": "Amul",
+            "category": "Dairy",
+            "selling_price": Decimal("275.00"),
+            "hsn_code": "0405",
+            "gst_rate": Decimal("12"),
+            "cess_rate": Decimal("0"),
+            "is_gst_exempt": False,
+            "gst_category": "BUTTER",
+            "current_stock": 50,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now
+        },
+        # 18% - FMCG (Maggi Noodles)
+        {
+            "store_id": "STR-TEST001",
+            "product_id": "PROD-GST-18",
+            "product_name": "Maggi Noodles 70g",
+            "brand": "Nestle",
+            "category": "Instant Foods",
+            "selling_price": Decimal("14.00"),
+            "hsn_code": "1902",
+            "gst_rate": Decimal("18"),
+            "cess_rate": Decimal("0"),
+            "is_gst_exempt": False,
+            "gst_category": "NOODLES",
+            "current_stock": 300,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now
+        },
+        # 28% with Cess - Luxury (Coca Cola)
+        {
+            "store_id": "STR-TEST001",
+            "product_id": "PROD-GST-28",
+            "product_name": "Coca Cola 2L",
+            "brand": "Coca Cola",
+            "category": "Beverages",
+            "selling_price": Decimal("95.00"),
+            "hsn_code": "2202",
+            "gst_rate": Decimal("28"),
+            "cess_rate": Decimal("12"),
+            "is_gst_exempt": False,
+            "gst_category": "AERATED",
+            "current_stock": 40,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now
+        }
+    ]
+
+
+@pytest.fixture
+def gst_service_mock():
+    """Mock GST service for unit testing"""
+    from unittest.mock import MagicMock, AsyncMock
+    from app.services.gst_service import GSTService
+
+    service = MagicMock(spec=GSTService)
+    service.use_mock = True
+
+    # Setup async mock methods
+    service.get_gst_rate_for_product = AsyncMock()
+    service.calculate_item_gst = AsyncMock()
+    service.calculate_order_gst = AsyncMock()
+
+    return service
