@@ -8,13 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- (Future features will be logged here)
+- Regression tests for store registration address fields (E2E with Playwright)
 
 ### Changed
-- (Future changes will be logged here)
+- Store registration: State dropdown now appears before City (consistent with customer registration)
+- Store registration: City field now uses Autocomplete filtered by selected state
+- Store registration: Delivery radius max increased from 20km to 100km
 
 ### Fixed
-- (Future bug fixes will be logged here)
+- Store registration: Address form field order (State now before City)
+- Store registration: City dropdown now filtered by selected state (uses indianLocations.ts)
+- Store registration: Delivery radius validation (1-100 km range)
+- Store registration: Improved error handling with specific error messages
 
 ---
 
