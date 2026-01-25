@@ -30,6 +30,27 @@ RATE_LIMITS = {
     "ip_address": {
         "requests_per_minute": 200,
         "window_seconds": 60
+    },
+    # Stricter limits for authentication endpoints
+    "auth_otp_send": {
+        "requests_per_minute": 5,  # Max 5 OTP requests per minute per phone
+        "window_seconds": 60
+    },
+    "auth_otp_verify": {
+        "requests_per_minute": 10,  # Max 10 verify attempts per minute per phone
+        "window_seconds": 60
+    },
+    "auth_login": {
+        "requests_per_minute": 10,  # Max 10 login attempts per minute per IP
+        "window_seconds": 60
+    },
+    "auth_register": {
+        "requests_per_minute": 5,  # Max 5 registration attempts per minute per IP
+        "window_seconds": 60
+    },
+    "auth_password_reset": {
+        "requests_per_minute": 3,  # Max 3 password reset requests per minute
+        "window_seconds": 60
     }
 }
 
@@ -249,26 +270,84 @@ async def close_redis():
         await redis_client.close()
         logger.info("Redis connection closed")
 
+# Authentication paths that need stricter rate limiting
+AUTH_PATHS = {
+    "/api/v1/auth/send-otp": "auth_otp_send",
+    "/api/v1/auth/verify-otp": "auth_otp_verify",
+    "/api/v1/auth/login": "auth_login",
+    "/api/v1/customer/auth/send-otp": "auth_otp_send",
+    "/api/v1/customer/auth/verify-otp": "auth_otp_verify",
+    "/api/v1/customer/auth/login": "auth_login",
+    "/api/v1/customer/auth/register": "auth_register",
+    "/api/v1/admin/auth/login": "auth_login",
+    "/api/v1/auth/send-email-passcode": "auth_otp_send",
+    "/api/v1/auth/verify-email-passcode": "auth_otp_verify",
+}
+
+
 # Rate limit middleware for automatic application
 async def rate_limit_middleware(request: Request, call_next):
     """
     Middleware for automatic rate limiting
-    
+
     Args:
         request: FastAPI request object
         call_next: Next middleware/endpoint
-        
+
     Returns:
         Response from next middleware/endpoint
     """
-    # Skip rate limiting for health checks
+    # Skip rate limiting for health checks and docs
     if request.url.path in ["/health", "/health/detailed", "/docs", "/redoc", "/openapi.json"]:
         return await call_next(request)
-    
+
     try:
-        # Apply rate limiting
+        # Check if this is an authentication endpoint requiring stricter limits
+        path = request.url.path
+        if path in AUTH_PATHS:
+            limit_type = AUTH_PATHS[path]
+
+            # Get the key based on limit type
+            key = None
+            if limit_type in ["auth_otp_send", "auth_otp_verify"]:
+                # Try to get phone/email from request body
+                try:
+                    body_bytes = await request.body()
+                    body = json.loads(body_bytes.decode())
+                    key = body.get("phone") or body.get("email")
+
+                    # Reset body stream for endpoint to read
+                    async def receive():
+                        return {"type": "http.request", "body": body_bytes}
+                    request._receive = receive
+                except:
+                    pass
+
+            # Fallback to IP address
+            if not key:
+                key = request.client.host if request.client else "unknown"
+
+            # Check stricter auth rate limit
+            if not await check_rate_limit(key, limit_type, request):
+                config = RATE_LIMITS.get(limit_type, RATE_LIMITS["ip_address"])
+                retry_after = config["window_seconds"]
+
+                logger.warning(f"Auth rate limit exceeded for {path}: {key[-4:].rjust(len(key), '*') if key and len(key) > 4 else '****'}")
+
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content={
+                        "error": "Rate limit exceeded",
+                        "message": f"Too many requests. Please try again in {retry_after} seconds.",
+                        "retry_after": retry_after
+                    },
+                    headers={"Retry-After": str(retry_after)}
+                )
+
+        # Apply general rate limiting
         await rate_limit_dependency(request)
         return await call_next(request)
+
     except HTTPException as e:
         if e.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
             return JSONResponse(
@@ -328,26 +407,165 @@ async def get_rate_limit_status(key: str, limit_type: str) -> Dict[str, Any]:
 async def reset_rate_limit(key: str, limit_type: str) -> bool:
     """
     Reset rate limit for a key (admin function)
-    
+
     Args:
         key: Rate limit key
         limit_type: Type of rate limit
-        
+
     Returns:
         True if reset successful
     """
     try:
         redis_client = await get_redis_client()
-        
+
         if redis_client is None:
             return False
-        
+
         redis_key = f"rate_limit:{limit_type}:{key}"
         await redis_client.delete(redis_key)
-        
+
         logger.info(f"Rate limit reset for {limit_type}: {key}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error resetting rate limit: {e}")
         return False
+
+
+# =============================================================================
+# Authentication-specific Rate Limiting
+# =============================================================================
+
+async def check_auth_rate_limit(
+    key: str,
+    limit_type: str,
+    request: Request
+) -> None:
+    """
+    Check authentication-specific rate limit.
+    Raises HTTPException if rate limit exceeded.
+
+    Args:
+        key: Rate limit key (phone, email, or IP)
+        limit_type: Type of auth rate limit
+        request: FastAPI request object
+
+    Raises:
+        HTTPException: If rate limit is exceeded
+    """
+    if not await check_rate_limit(key, limit_type, request):
+        config = RATE_LIMITS.get(limit_type, RATE_LIMITS["ip_address"])
+        retry_after = config["window_seconds"]
+
+        logger.warning(f"Auth rate limit exceeded: {limit_type} for key: {key[-4:].rjust(len(key), '*') if len(key) > 4 else '****'}")
+
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "Too many requests",
+                "message": f"Rate limit exceeded. Please try again in {retry_after} seconds.",
+                "retry_after": retry_after
+            },
+            headers={"Retry-After": str(retry_after)}
+        )
+
+
+def create_auth_rate_limit_dependency(limit_type: str, key_param: str = "ip"):
+    """
+    Factory function to create authentication rate limit dependencies.
+
+    Args:
+        limit_type: Type of rate limit (e.g., 'auth_otp_send', 'auth_login')
+        key_param: What to use as rate limit key ('ip', 'phone', 'email')
+
+    Returns:
+        FastAPI dependency function
+
+    Usage:
+        @router.post("/send-otp")
+        async def send_otp(
+            request: SendOTPRequest,
+            _: None = Depends(create_auth_rate_limit_dependency("auth_otp_send", "phone"))
+        ):
+            ...
+    """
+    async def rate_limit_check(request: Request):
+        # Get the key based on key_param
+        key = None
+
+        if key_param == "ip":
+            key = request.client.host if request.client else "unknown"
+        elif key_param in ["phone", "email"]:
+            # Try to get from request body
+            try:
+                body = await request.json()
+                # Reset the body stream for subsequent reads
+                async def receive():
+                    return {"type": "http.request", "body": json.dumps(body).encode()}
+                request._receive = receive
+
+                if isinstance(body, dict):
+                    key = body.get(key_param)
+            except:
+                pass
+
+            # Fallback to IP if no phone/email found
+            if not key:
+                key = request.client.host if request.client else "unknown"
+
+        if key:
+            await check_auth_rate_limit(key, limit_type, request)
+
+    return rate_limit_check
+
+
+# Pre-built dependencies for common auth operations
+async def rate_limit_otp_send(request: Request):
+    """Rate limit for OTP send endpoints"""
+    # Get phone from request body
+    key = None
+    try:
+        body = await request.json()
+        # Store body for reuse
+        request.state.body = body
+        if isinstance(body, dict):
+            key = body.get("phone")
+    except:
+        pass
+
+    if not key:
+        key = request.client.host if request.client else "unknown"
+
+    await check_auth_rate_limit(key, "auth_otp_send", request)
+
+
+async def rate_limit_otp_verify(request: Request):
+    """Rate limit for OTP verify endpoints"""
+    key = None
+    try:
+        # Try to get stored body first
+        body = getattr(request.state, 'body', None)
+        if body is None:
+            body = await request.json()
+            request.state.body = body
+        if isinstance(body, dict):
+            key = body.get("phone")
+    except:
+        pass
+
+    if not key:
+        key = request.client.host if request.client else "unknown"
+
+    await check_auth_rate_limit(key, "auth_otp_verify", request)
+
+
+async def rate_limit_login(request: Request):
+    """Rate limit for login endpoints"""
+    key = request.client.host if request.client else "unknown"
+    await check_auth_rate_limit(key, "auth_login", request)
+
+
+async def rate_limit_register(request: Request):
+    """Rate limit for registration endpoints"""
+    key = request.client.host if request.client else "unknown"
+    await check_auth_rate_limit(key, "auth_register", request)

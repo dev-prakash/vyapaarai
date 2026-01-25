@@ -1,18 +1,32 @@
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException
 import asyncio
 from datetime import datetime
 import os
 import psutil
 import platform
+import time
+from typing import Dict, Any, Optional
 
-from app.database.session import get_db
 from app.core.config import settings
+from app.core.database import db_manager, ORDERS_TABLE, STORES_TABLE
 
 router = APIRouter()
 
+# Health check timeout (seconds)
+HEALTH_CHECK_TIMEOUT = 5
+
+
+async def run_with_timeout(coro, timeout: float, default: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a coroutine with timeout, return default on failure"""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        return {**default, "status": "timeout", "message": f"Check timed out after {timeout}s"}
+    except Exception as e:
+        return {**default, "status": "error", "message": str(e)}
+
 @router.get("/health")
-async def detailed_health_check(db: Session = Depends(get_db)):
+async def detailed_health_check():
     """
     Comprehensive health check endpoint
     Returns detailed system health information
@@ -27,42 +41,47 @@ async def detailed_health_check(db: Session = Depends(get_db)):
     }
     
     overall_healthy = True
-    
-    # Database connectivity check (PostgreSQL)
-    try:
-        db.execute("SELECT 1").fetchone()
-        health_status["checks"]["database"] = {
-            "status": "healthy",
-            "message": "PostgreSQL connection successful",
-            "type": "postgresql"
-        }
-    except Exception as e:
-        health_status["checks"]["database"] = {
-            "status": "unhealthy",
-            "message": f"Database connection failed: {str(e)}",
-            "type": "postgresql",
-            "error": str(e)
-        }
+
+    # Database connection health check using centralized manager
+    async def check_dynamodb() -> Dict[str, Any]:
+        """Check DynamoDB connectivity with timeout"""
+        start = time.time()
+        try:
+            dynamodb_client = db_manager.get_dynamodb_client()
+            if not dynamodb_client:
+                return {
+                    "status": "not_configured",
+                    "message": "DynamoDB client not initialized"
+                }
+
+            # Use describe_table which is fast and confirms connectivity
+            response = dynamodb_client.describe_table(TableName=ORDERS_TABLE)
+            latency_ms = (time.time() - start) * 1000
+
+            return {
+                "status": "healthy",
+                "message": "DynamoDB connection successful",
+                "table": ORDERS_TABLE,
+                "table_status": response.get('Table', {}).get('TableStatus', 'unknown'),
+                "latency_ms": round(latency_ms, 2)
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "message": f"DynamoDB connection failed: {str(e)}",
+                "table": ORDERS_TABLE
+            }
+
+    # Run DynamoDB check with timeout
+    health_status["checks"]["dynamodb"] = await run_with_timeout(
+        check_dynamodb(),
+        timeout=HEALTH_CHECK_TIMEOUT,
+        default={"table": ORDERS_TABLE}
+    )
+
+    # Mark overall as unhealthy if DynamoDB is critical
+    if health_status["checks"]["dynamodb"].get("status") == "unhealthy":
         overall_healthy = False
-    
-    # DynamoDB check
-    try:
-        import boto3
-        dynamodb = boto3.client('dynamodb', region_name='ap-south-1')
-        dynamodb.describe_table(TableName='vyaparai-orders-prod')
-        health_status["checks"]["dynamodb"] = {
-            "status": "healthy",
-            "message": "DynamoDB connection successful",
-            "table": "vyaparai-orders-prod"
-        }
-    except Exception as e:
-        health_status["checks"]["dynamodb"] = {
-            "status": "unhealthy",
-            "message": f"DynamoDB connection failed: {str(e)}",
-            "table": "vyaparai-orders-prod",
-            "error": str(e)
-        }
-        # Don't mark overall as unhealthy for DynamoDB issues (optional service)
     
     # Gemini API check
     try:
@@ -88,31 +107,48 @@ async def detailed_health_check(db: Session = Depends(get_db)):
         }
         # Don't mark overall as unhealthy for external API issues
     
-    # Redis check (if configured)
-    try:
+    # Redis check with async and timeout
+    async def check_redis() -> Dict[str, Any]:
+        """Check Redis connectivity with timeout"""
+        start = time.time()
         redis_url = os.getenv("REDIS_URL")
-        if redis_url:
-            import redis
-            r = redis.from_url(redis_url)
-            r.ping()
-            health_status["checks"]["redis"] = {
-                "status": "healthy",
-                "message": "Redis connection successful",
-                "configured": True
-            }
-        else:
-            health_status["checks"]["redis"] = {
-                "status": "warning",
-                "message": "Redis not configured",
+        if not redis_url:
+            return {
+                "status": "not_configured",
+                "message": "Redis URL not configured",
                 "configured": False
             }
-    except Exception as e:
-        health_status["checks"]["redis"] = {
-            "status": "unhealthy",
-            "message": f"Redis connection failed: {str(e)}",
-            "error": str(e)
-        }
-        # Don't mark overall as unhealthy for Redis issues (optional service)
+
+        try:
+            redis_client = await db_manager.get_redis()
+            if redis_client:
+                await redis_client.ping()
+                latency_ms = (time.time() - start) * 1000
+                return {
+                    "status": "healthy",
+                    "message": "Redis connection successful",
+                    "configured": True,
+                    "latency_ms": round(latency_ms, 2)
+                }
+            else:
+                return {
+                    "status": "warning",
+                    "message": "Redis client not available",
+                    "configured": True
+                }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "message": f"Redis connection failed: {str(e)}",
+                "configured": True
+            }
+
+    health_status["checks"]["redis"] = await run_with_timeout(
+        check_redis(),
+        timeout=HEALTH_CHECK_TIMEOUT,
+        default={"configured": False}
+    )
+    # Redis is optional, don't mark overall as unhealthy
     
     # System resources check
     try:

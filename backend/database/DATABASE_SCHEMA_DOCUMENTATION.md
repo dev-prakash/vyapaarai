@@ -65,6 +65,8 @@ This document provides a comprehensive overview of all database tables used in t
 - city (VARCHAR): City
 - state (VARCHAR): State
 - pincode (VARCHAR): PIN code
+- latitude (DECIMAL): GPS latitude (auto-geocoded at registration)
+- longitude (DECIMAL): GPS longitude (auto-geocoded at registration)
 - gstin (VARCHAR): GST number (optional)
 - store_type (VARCHAR): Type of store (grocery, pharmacy, etc.)
 - business_hours (JSONB): Operating hours by day
@@ -78,6 +80,11 @@ This document provides a comprehensive overview of all database tables used in t
 - created_at (TIMESTAMP): Registration date
 - updated_at (TIMESTAMP): Last profile update
 ```
+
+**Geocoding Note**: latitude/longitude are auto-geocoded from address using Google Maps Geocoding API during store registration. These coordinates enable:
+- Distance-based store search (Haversine formula)
+- Cached coordinate lookup for pincode/landmark searches (avoids repeated API calls)
+- GPS-based "stores near me" functionality
 
 ### **store_users**
 **Purpose**: Links users to stores with specific roles (owner, staff, manager)
@@ -245,35 +252,77 @@ This document provides a comprehensive overview of all database tables used in t
 
 ## 4. ORDER MANAGEMENT TABLES
 
-### **orders**
+### **orders** (DynamoDB: vyaparai-orders-prod)
 **Purpose**: Customer orders placed with stores
-**When Created**: When customer places an order
+**When Created**: When customer places an order (via Saga pattern with stock reservation)
 **When Updated**: Status changes, payment confirmation, delivery updates
 **When Deleted**: Never (may be cancelled but not deleted)
+
+**DynamoDB Structure**:
+```
+Primary Key:
+  Partition Key: store_id (String)
+  Sort Key: id (String) - order_id
+
+GSIs:
+  - customer_id-index: For fetching customer order history
+  - status-index: For filtering orders by status
+```
+
+**Attributes**:
 ```sql
-- id (UUID): Primary key
-- order_number (VARCHAR): Human-readable order ID
-- store_id (UUID): Store receiving order
-- customer_id (UUID): Customer placing order
-- customer_name (VARCHAR): Customer name
-- customer_phone (VARCHAR): Contact number
-- customer_email (VARCHAR): Email address
-- delivery_address (TEXT): Delivery location
-- order_type (ENUM): delivery, pickup, dine_in
-- status (ENUM): pending, confirmed, preparing, ready, out_for_delivery, delivered, cancelled
-- total_amount (DECIMAL): Order total
-- tax_amount (DECIMAL): Total tax
-- delivery_charge (DECIMAL): Delivery fee
-- discount_amount (DECIMAL): Total discount
-- final_amount (DECIMAL): Amount to pay
-- payment_method (ENUM): cash, upi, card, wallet
-- payment_status (ENUM): pending, paid, failed, refunded
-- delivery_date (DATE): Expected delivery
-- delivery_time_slot (VARCHAR): Delivery window
-- notes (TEXT): Special instructions
-- created_at (TIMESTAMP): Order placement time
-- updated_at (TIMESTAMP): Last status update
-- delivered_at (TIMESTAMP): Actual delivery time
+- id (String): Order ID (format: ord_{timestamp})
+- order_number (String): Human-readable order ID (format: ORD-{timestamp})
+- tracking_id (String): Tracking ID (format: TRK-{uuid12})
+- store_id (String): Store receiving order
+- customer_id (String): Customer placing order
+- customer_name (String): Customer name
+- customer_phone (String): Contact number
+- delivery_address (JSON String): Serialized delivery address from customer profile
+- status (String): placed, confirmed, preparing, ready, out_for_delivery, delivered, cancelled
+- total_amount (Decimal): Order total including delivery
+- payment_method (String): cod, upi, card, wallet
+- payment_status (String): pending, paid, failed, refunded
+- payment_id (String): Payment gateway transaction ID (for online payments)
+- items (List): Order items with quantities and prices
+  - product_id (String)
+  - product_name (String)
+  - quantity (Number)
+  - unit_price (Decimal)
+  - item_total (Decimal)
+  - mrp (Decimal)
+- delivery_notes (String): Delivery instructions
+- customer_note (String): Order notes
+- cancel_reason (String): Cancellation reason (if cancelled)
+- channel (String): Order channel (web, app, whatsapp)
+- language (String): Customer preferred language
+- created_at (String): ISO timestamp
+- updated_at (String): ISO timestamp
+- estimated_delivery (String): Estimated delivery time
+```
+
+**Order Creation - Saga Pattern**:
+```
+Order creation uses transactional safety via the Saga pattern:
+
+1. STOCK RESERVATION (Atomic)
+   - Use DynamoDB TransactWriteItems to deduct stock for ALL items
+   - Conditional expressions ensure stock >= requested quantity
+   - If ANY item fails: entire transaction rolls back (no partial deduction)
+
+2. ORDER CREATION
+   - Create order record in vyaparai-orders-prod
+   - Include all item details, customer info, addresses
+
+3. COMPENSATING TRANSACTION (on failure)
+   - If order creation fails after stock reservation
+   - Automatically restore stock (add back quantities)
+   - Log critical error for monitoring
+
+This prevents:
+- Overselling due to race conditions
+- Orphaned orders without inventory deduction
+- Lost inventory (reduced but order not created)
 ```
 
 ### **order_items**
@@ -387,10 +436,17 @@ This document provides a comprehensive overview of all database tables used in t
 - state (VARCHAR): State
 - pincode (VARCHAR): PIN code
 - landmark (VARCHAR): Nearby landmark
+- latitude (DECIMAL): GPS latitude (auto-geocoded when address saved)
+- longitude (DECIMAL): GPS longitude (auto-geocoded when address saved)
 - is_default (BOOLEAN): Default address flag
 - created_at (TIMESTAMP): Addition time
 - updated_at (TIMESTAMP): Last update
 ```
+
+**Geocoding Note**: latitude/longitude are auto-geocoded from address using Google Maps Geocoding API when a customer saves an address. These coordinates enable:
+- Finding nearby stores from customer's saved address
+- Accurate delivery distance calculations
+- Pre-computed coordinates avoid API calls during store searches
 
 ---
 
@@ -600,4 +656,306 @@ Key indexes for optimal performance:
 
 ---
 
-This documentation represents the complete database schema for VyaparAI as of the current implementation.
+## 11. RBAC & PERMISSIONS TABLES (DynamoDB)
+
+### **vyaparai-permissions-prod**
+**Purpose**: Stores individual permission definitions for the RBAC system
+**When Created**: System initialization with seeded permissions
+**When Updated**: When new features require new permissions
+**When Deleted**: Never (may be marked as deprecated)
+
+**DynamoDB Structure**:
+```
+Primary Key: permission_id (String)
+GSI - CategoryIndex:
+  - PK: category
+  - SK: status
+```
+
+**Attributes**:
+```
+- permission_id (String): Unique identifier (e.g., "PERM_PRODUCT_CREATE")
+- name (String): Human-readable name (e.g., "Create Products")
+- description (String): Detailed description of permission
+- category (String): Permission category (product_management | user_management | role_management | analytics | settings)
+- resource (String): Target resource (e.g., "products", "users", "roles")
+- action (String): Action type (create | read | update | delete | export | import | configure)
+- status (String): active | deprecated
+- created_at (String): ISO timestamp
+- updated_at (String): ISO timestamp
+```
+
+**Seeded Permissions (22 total)**:
+- Product Management: CREATE, READ, UPDATE, DELETE, EXPORT, IMPORT_BULK
+- User Management: CREATE, READ, UPDATE, DELETE, ASSIGN_ROLES, ASSIGN_PERMISSIONS
+- Role Management: CREATE, READ, UPDATE, DELETE
+- Analytics: VIEW, REPORTS_GENERATE, REPORTS_EXPORT
+- Settings: VIEW, UPDATE, SYSTEM_CONFIG
+
+### **vyaparai-roles-prod**
+**Purpose**: Stores role definitions with associated permissions
+**When Created**: System initialization with default roles
+**When Updated**: When role permissions are modified
+**When Deleted**: Never for system roles; custom roles can be deleted
+
+**DynamoDB Structure**:
+```
+Primary Key: role_id (String)
+GSI - HierarchyIndex:
+  - PK: status
+  - SK: hierarchy_level
+```
+
+**Attributes**:
+```
+- role_id (String): Unique identifier (e.g., "ROLE_SUPER_ADMIN")
+- role_name (String): Human-readable name
+- description (String): Role description
+- permissions (StringSet): List of permission IDs or ["*"] for all
+- hierarchy_level (Number): 1-100 (lower = higher privilege)
+- is_system_role (Boolean): System roles cannot be deleted
+- status (String): active | inactive
+- created_at (String): ISO timestamp
+- updated_at (String): ISO timestamp
+```
+
+**Seeded Roles (5 total)**:
+1. ROLE_SUPER_ADMIN (Level 1) - All permissions
+2. ROLE_ADMIN (Level 10) - Product, user, analytics, settings
+3. ROLE_STORE_MANAGER (Level 20) - Product read/update, analytics
+4. ROLE_CATALOG_EDITOR (Level 30) - Product CRUD + export
+5. ROLE_VIEWER (Level 50) - Read-only access
+
+### **vyaparai-user-permissions-prod**
+**Purpose**: Junction table tracking user-permission assignments with audit trail
+**When Created**: When permissions are assigned to users
+**When Updated**: Never (create new record for changes)
+**When Deleted**: When permission is revoked
+
+**DynamoDB Structure**:
+```
+Primary Key: assignment_id (String) - Format: {user_id}#{permission_id}
+GSI1 - UserPermissionsIndex:
+  - PK: user_id
+  - SK: assignment_type
+GSI2 - PermissionUsersIndex:
+  - PK: permission_id
+```
+
+**Attributes**:
+```
+- assignment_id (String): Composite key
+- user_id (String): User identifier
+- permission_id (String): Permission identifier
+- granted_by (String): User ID who granted permission
+- assignment_type (String): direct | role_inherited | override
+- expires_at (String): Optional expiration timestamp
+- assigned_at (String): ISO timestamp
+```
+
+---
+
+## 12. BULK IMPORT SYSTEM TABLES (DynamoDB)
+
+### **vyaparai-import-jobs-prod**
+**Purpose**: Manages async CSV import job lifecycle and status tracking
+**When Created**: When admin uploads CSV for bulk product import
+**When Updated**: Throughout job processing (status, progress updates)
+**When Deleted**: Auto-cleanup after 30 days via TTL
+
+**DynamoDB Structure**:
+```
+Primary Key: job_id (String)
+GSI - created_by_user_id_gsi-index: For listing user's jobs
+GSI - status_gsi-index: For monitoring jobs by status
+GSI - job_type_gsi: For filtering by import type
+TTL Attribute: ttl (auto-delete after 30 days)
+```
+
+**Attributes**:
+```
+- job_id (String): Unique identifier (e.g., "admin_import_20250106_abc123")
+- job_type (String): admin_product_import | store_inventory_upload
+- store_id (String): Store ID for inventory uploads (null for admin imports)
+- created_by_user_id (String): User who created the job
+- created_by_email (String): Email of job creator
+- status (String): queued | processing | completed | completed_with_errors | failed | cancelled
+- status_history (List): Array of status transitions with timestamps
+- created_at (String): Job creation timestamp
+- started_at (String): Processing start timestamp
+- completed_at (String): Job completion timestamp
+- estimated_completion_at (String): Estimated finish time
+- total_rows (Number): Total CSV rows
+- processed_rows (Number): Rows processed so far
+- successful_count (Number): Successfully imported products
+- duplicate_count (Number): Skipped duplicates
+- error_count (Number): Rows with errors
+- skipped_count (Number): Skipped rows
+- s3_bucket (String): S3 bucket containing CSV
+- s3_input_key (String): S3 key for input CSV
+- s3_error_report_key (String): S3 key for error report CSV
+- input_filename (String): Original filename
+- input_file_size_bytes (Number): File size
+- input_row_count_estimate (Number): Estimated row count
+- import_options (Map): Configuration options
+  - skip_duplicates (Boolean)
+  - auto_verify (Boolean)
+  - default_verification_status (String)
+  - process_images (Boolean)
+  - default_region (String)
+  - match_strategy (String): strict | fuzzy
+  - notification_email (String)
+- recent_errors (List): Last 10 error records
+- processing_lambda_arn (String): Lambda function processing job
+- processing_start_memory_mb (Number): Lambda memory allocated
+- processing_duration_seconds (Number): Total processing time
+- checkpoint (Map): Resume point for long-running jobs
+  - last_processed_row (Number)
+- ttl (Number): Unix timestamp for auto-deletion
+```
+
+**Job Lifecycle**:
+1. QUEUED - Job created, waiting for processing
+2. PROCESSING - Lambda function actively processing CSV
+3. COMPLETED - All rows processed successfully
+4. COMPLETED_WITH_ERRORS - Finished but some rows had errors
+5. FAILED - Critical error occurred, job aborted
+6. CANCELLED - User cancelled the job
+
+**Checkpoint/Resume System**:
+- For large CSV files (>5000 rows), processing may exceed Lambda timeout
+- Checkpoint saves progress (last_processed_row) to DynamoDB
+- Lambda re-invokes itself with checkpoint to resume processing
+- Ensures no data loss for large imports
+
+---
+
+## 13. TRANSLATION & CACHING TABLES (DynamoDB)
+
+### **vyaparai-translation-cache-prod**
+**Purpose**: Caches translated text to reduce Google Translate API costs
+**When Created**: After first translation of a text string
+**When Updated**: Never (cache is immutable)
+**When Deleted**: Auto-cleanup after 30 days via TTL
+
+**DynamoDB Structure**:
+```
+Primary Key: cacheKey (String) - Format: {sourceText}__{sourceLanguage}__{targetLanguage}
+TTL Attribute: ttl (auto-delete after 30 days)
+```
+
+**Attributes**:
+```
+- cacheKey (String): Composite key (e.g., "tata salt__en__hi")
+- sourceText (String): Original text in source language
+- translatedText (String): Translated text
+- sourceLanguage (String): Source language code (default: "en")
+- targetLanguage (String): Target language code (e.g., "hi", "ta", "mr")
+- timestamp (String): Cache creation timestamp
+- ttl (Number): Unix timestamp for expiration
+```
+
+**Cache Strategy**:
+- Before calling Google Translate API, check cache for existing translation
+- Cache hit: Return cached translation (no API cost)
+- Cache miss: Call API, store result, return translation
+- TTL: 30 days ensures fresh translations while minimizing API costs
+- Key normalization: Convert to lowercase, trim whitespace for consistency
+
+**Supported Languages**:
+- en (English), hi (Hindi), mr (Marathi), ta (Tamil), te (Telugu), bn (Bengali)
+- And additional languages as configured
+
+---
+
+## Database Relationships Summary
+
+1. **User → Store**: Many-to-many through store_users
+2. **Store → Products**: One-to-many (store_products)
+3. **Generic Product → Store Products**: One-to-many
+4. **Order → Order Items**: One-to-many
+5. **Store → Orders**: One-to-many
+6. **Customer → Orders**: One-to-many
+7. **Product → Stock Movements**: One-to-many
+8. **Store → Suppliers**: One-to-many
+9. **User → Roles**: Many-to-many through user-permissions (RBAC)
+10. **Role → Permissions**: Many-to-many (stored as StringSet in roles)
+11. **User → Permissions**: Many-to-many through user-permissions (direct assignment)
+
+---
+
+## Data Retention Policies
+
+- **Financial Records**: 7 years (legal requirement)
+- **Order History**: 3 years
+- **Audit Logs**: 2 years
+- **Analytics Data**: 1 year detailed, 3 years aggregated
+- **Messages**: 6 months
+- **OTP Records**: 24 hours
+- **Session Data**: 30 days
+- **Import Jobs**: 30 days (auto-cleanup via TTL)
+- **Translation Cache**: 30 days (auto-cleanup via TTL)
+
+---
+
+## Performance Indexes
+
+Key indexes for optimal performance:
+- stores(store_id, status)
+- stores(latitude, longitude) - For geo-spatial queries
+- stores(pincode) - For pincode-based coordinate caching
+- store_products(store_id, status, sku)
+- orders(store_id, created_at, status)
+- stock_movements(store_product_id, created_at)
+- generic_products(searchable_keywords) - GIN index
+- users(email, phone)
+- customer_addresses(customer_id, latitude, longitude)
+
+**DynamoDB GSIs**:
+- permissions: CategoryIndex (category + status)
+- roles: HierarchyIndex (status + hierarchy_level)
+- user-permissions: UserPermissionsIndex (user_id + assignment_type), PermissionUsersIndex (permission_id)
+- import-jobs: created_by_user_id_gsi, status_gsi, job_type_gsi
+
+---
+
+## Security Considerations
+
+1. **PII Encryption**: Customer phone, email encrypted at rest
+2. **Password Security**: bcrypt hashing with salt
+3. **Row-Level Security**: Store data isolation by store_id
+4. **Audit Trail**: All critical operations logged
+5. **Soft Deletes**: Most deletions are soft (mark inactive)
+6. **Data Masking**: Sensitive data masked in logs
+7. **RBAC Enforcement**: Permission checks at API layer
+8. **TTL Auto-Cleanup**: Automatic removal of temporary data
+9. **Hierarchy Protection**: Role hierarchy prevents privilege escalation
+
+---
+
+## Database Technology Stack
+
+**PostgreSQL (RDS)**: Used for relational data (users, stores, products, orders, inventory)
+**DynamoDB**: Used for high-throughput, flexible schema data (RBAC, import jobs, translation cache)
+**Hybrid Strategy**: Combines strengths of both databases for optimal performance
+
+**PostgreSQL Tables**: ~40+ tables for core business logic
+**DynamoDB Tables**: 5 tables for scalable, high-throughput operations
+  - vyaparai-users-prod
+  - vyaparai-permissions-prod
+  - vyaparai-roles-prod
+  - vyaparai-user-permissions-prod
+  - vyaparai-import-jobs-prod
+  - vyaparai-translation-cache-prod
+  - vyaparai-stores-prod (and others)
+
+---
+
+**Last Updated**: December 12, 2025
+**Document Version**: 2.2.0
+**Status**: Comprehensive - All tables documented including RBAC, import-jobs, translation-cache, geocoding fields, and order transaction patterns
+
+This documentation now represents the **complete** database schema for VyaparAI including:
+- All 5 RBAC/System tables (permissions, roles, user-permissions, import-jobs, translation-cache)
+- Geocoding fields (latitude/longitude) on stores and customer_addresses for location-based search
+- Order transaction patterns with Saga pattern for stock reservation

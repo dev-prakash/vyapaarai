@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Decimal, DateTime, Boolean, Text, Enum, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Enum, ForeignKey
+from sqlalchemy.types import Numeric
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from enum import Enum as PyEnum
@@ -47,9 +48,9 @@ class Product(Base):
     subcategory = Column(String(100))
     
     # Pricing
-    price = Column(Decimal(10, 2), nullable=False)
-    mrp = Column(Decimal(10, 2))
-    cost_price = Column(Decimal(10, 2))
+    price = Column(Numeric(10, 2), nullable=False)
+    mrp = Column(Numeric(10, 2))
+    cost_price = Column(Numeric(10, 2))
     
     # Inventory tracking
     current_stock = Column(Integer, default=0)

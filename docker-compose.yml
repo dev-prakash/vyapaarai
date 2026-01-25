@@ -1,6 +1,18 @@
 version: '3.8'
 
 services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: vyaparai-dynamodb-local
+    ports:
+      - "8000:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
+    volumes:
+      - dynamodb-data:/data
+    networks:
+      - vyaparai-network
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     container_name: vyaparai-postgres
@@ -48,7 +60,12 @@ services:
     depends_on:
       - postgres
 
+networks:
+  vyaparai-network:
+    driver: bridge
+
 volumes:
+  dynamodb-data:
   postgres_data:
   redis_data:
   pgadmin_data:

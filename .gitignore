@@ -193,3 +193,28 @@ backup_before_cleanup_*/
 
 # Local development
 .local
+
+# Backup directories
+*_backup_*/
+backup_*/
+
+
+# Lambda build artifacts
+backend/lambda-*/
+backend/lambda_*/
+backend/backups/
+backend/secrets/
+
+# Terraform
+infrastructure/terraform/.terraform/
+infrastructure/terraform-*/.terraform/
+*.tfstate
+*.tfstate.backup
+
+# Test results
+test-results/
+
+# Submodules with local changes
+extension/
+frontend-pwa/
+

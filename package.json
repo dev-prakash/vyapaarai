@@ -23,6 +23,8 @@
     "analyze:features": "python3 scripts/feature-gap-analysis.py"
   },
   "dependencies": {
-    "axios": "^1.11.0"
+    "@types/dompurify": "^3.0.5",
+    "axios": "^1.11.0",
+    "dompurify": "^3.3.0"
   }
 }
