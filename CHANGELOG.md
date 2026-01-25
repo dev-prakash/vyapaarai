@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-01-25
+
+**Dynamic GST Administration** - Admin can update GST rates without code deployment
+
 ### Added
 - **Dynamic GST Reference Tables** - Admin can now update GST rates without code deployment
   - New DynamoDB tables: `vyaparai-gst-rates-{env}` and `vyaparai-hsn-mappings-{env}`
