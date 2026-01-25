@@ -569,6 +569,94 @@ resource "aws_dynamodb_table" "metrics" {
   }
 }
 
+# GST Rates Table - Dynamic GST category rates (admin-managed)
+resource "aws_dynamodb_table" "gst_rates" {
+  name         = "vyaparai-gst-rates-${var.environment}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "category_code"
+
+  # Primary key attribute
+  attribute {
+    name = "category_code"
+    type = "S"
+  }
+
+  # GSI attribute for rate-based queries
+  attribute {
+    name = "gst_rate"
+    type = "N"
+  }
+
+  # GSI: gst-rate-index (for querying categories by rate)
+  global_secondary_index {
+    name            = "gst-rate-index"
+    hash_key        = "gst_rate"
+    projection_type = "ALL"
+    write_capacity  = null
+    read_capacity   = null
+  }
+
+  # Point-in-time recovery
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  # Server-side encryption
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Environment = var.environment
+    Service     = "vyaparai-gst"
+    TableType   = "reference-data"
+  }
+}
+
+# HSN Mappings Table - HSN code to GST category mappings (admin-managed)
+resource "aws_dynamodb_table" "hsn_mappings" {
+  name         = "vyaparai-hsn-mappings-${var.environment}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "hsn_code"
+
+  # Primary key attribute
+  attribute {
+    name = "hsn_code"
+    type = "S"
+  }
+
+  # GSI attribute for category-based queries
+  attribute {
+    name = "category_code"
+    type = "S"
+  }
+
+  # GSI: category-index (for querying HSN codes by category)
+  global_secondary_index {
+    name            = "category-index"
+    hash_key        = "category_code"
+    projection_type = "ALL"
+    write_capacity  = null
+    read_capacity   = null
+  }
+
+  # Point-in-time recovery
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  # Server-side encryption
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Environment = var.environment
+    Service     = "vyaparai-gst"
+    TableType   = "reference-data"
+  }
+}
+
 # Outputs for DynamoDB tables
 output "dynamodb_orders_table_name" {
   description = "Name of the Orders DynamoDB table"
@@ -608,4 +696,24 @@ output "dynamodb_products_table_name" {
 output "dynamodb_metrics_table_name" {
   description = "Name of the Metrics DynamoDB table"
   value       = aws_dynamodb_table.metrics.name
+}
+
+output "dynamodb_gst_rates_table_name" {
+  description = "Name of the GST Rates DynamoDB table"
+  value       = aws_dynamodb_table.gst_rates.name
+}
+
+output "dynamodb_gst_rates_table_arn" {
+  description = "ARN of the GST Rates DynamoDB table"
+  value       = aws_dynamodb_table.gst_rates.arn
+}
+
+output "dynamodb_hsn_mappings_table_name" {
+  description = "Name of the HSN Mappings DynamoDB table"
+  value       = aws_dynamodb_table.hsn_mappings.name
+}
+
+output "dynamodb_hsn_mappings_table_arn" {
+  description = "ARN of the HSN Mappings DynamoDB table"
+  value       = aws_dynamodb_table.hsn_mappings.arn
 }

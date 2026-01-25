@@ -25,8 +25,8 @@ from app.core.gst_config import (
     GST_CATEGORIES,
     GSTRate,
     get_default_gst_rate,
-    get_gst_rate_from_hsn,
-    suggest_category_from_product_name,
+    get_gst_rate_from_hsn as static_get_gst_rate_from_hsn,
+    suggest_category_from_product_name as static_suggest_category,
 )
 from app.models.gst import (
     GSTCategoryResponse,
@@ -37,6 +37,21 @@ from app.models.gst import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Import dynamic GST service (lazy import to avoid circular dependency)
+_dynamic_gst_service = None
+
+
+def _get_dynamic_service():
+    """Get the dynamic GST service (lazy initialization)."""
+    global _dynamic_gst_service
+    if _dynamic_gst_service is None:
+        try:
+            from app.services.dynamic_gst_service import dynamic_gst_service
+            _dynamic_gst_service = dynamic_gst_service
+        except ImportError as e:
+            logger.warning(f"Could not import dynamic_gst_service: {e}")
+    return _dynamic_gst_service
 
 
 class GSTService:
@@ -224,10 +239,31 @@ class GSTService:
                         is_override=False
                     )
 
-                # Priority 3: HSN code lookup
+                # Priority 3: HSN code lookup (dynamic with static fallback)
                 hsn_code = item.get('hsn_code')
                 if hsn_code:
-                    category = get_gst_rate_from_hsn(hsn_code)
+                    # Try dynamic service first
+                    dynamic_svc = _get_dynamic_service()
+                    if dynamic_svc:
+                        try:
+                            gst_rate = await dynamic_svc.get_gst_rate_from_hsn(hsn_code)
+                            if gst_rate is not None:
+                                cess_rate = await dynamic_svc.get_cess_rate_from_hsn(hsn_code)
+                                mapping = await dynamic_svc.get_hsn_mapping(hsn_code)
+                                return ProductGSTInfo(
+                                    product_id=product_id,
+                                    hsn_code=hsn_code,
+                                    gst_rate=gst_rate,
+                                    cess_rate=cess_rate,
+                                    gst_category=mapping.get('category_code') if mapping else None,
+                                    is_exempt=False,
+                                    is_override=False
+                                )
+                        except Exception as e:
+                            logger.warning(f"Dynamic HSN lookup failed, using static: {e}")
+
+                    # Fallback to static config
+                    category = static_get_gst_rate_from_hsn(hsn_code)
                     if category:
                         return ProductGSTInfo(
                             product_id=product_id,
@@ -239,10 +275,35 @@ class GSTService:
                             is_override=False
                         )
 
-                # Priority 4: Category suggestion from product name
+                # Priority 4: Category suggestion from product name (dynamic with static fallback)
                 product_name = item.get('product_name', '')
                 if product_name:
-                    suggested_category = suggest_category_from_product_name(product_name)
+                    suggested_category = None
+                    cat_data = None
+
+                    # Try dynamic service first
+                    dynamic_svc = _get_dynamic_service()
+                    if dynamic_svc:
+                        try:
+                            suggested_category = await dynamic_svc.suggest_category_from_product_name(product_name)
+                            if suggested_category:
+                                cat_data = await dynamic_svc.get_category(suggested_category)
+                        except Exception as e:
+                            logger.warning(f"Dynamic category suggestion failed, using static: {e}")
+
+                    # Use dynamic result if available
+                    if cat_data:
+                        return ProductGSTInfo(
+                            product_id=product_id,
+                            gst_rate=Decimal(str(cat_data.get('gst_rate', 18))),
+                            cess_rate=Decimal(str(cat_data.get('cess_rate', 0))),
+                            gst_category=suggested_category,
+                            is_exempt=False,
+                            is_override=False
+                        )
+
+                    # Fallback to static config
+                    suggested_category = static_suggest_category(product_name)
                     if suggested_category and suggested_category in GST_CATEGORIES:
                         cat = GST_CATEGORIES[suggested_category]
                         return ProductGSTInfo(
@@ -476,14 +537,36 @@ class GSTService:
             rate_wise_summary=rate_wise_summary
         )
 
-    def get_all_gst_categories(self) -> List[GSTCategoryResponse]:
+    async def get_all_gst_categories(self) -> List[GSTCategoryResponse]:
         """
-        Get all configured GST categories.
+        Get all configured GST categories (dynamic with static fallback).
 
         Returns:
             List of GSTCategoryResponse objects
         """
         categories = []
+
+        # Try dynamic service first
+        dynamic_svc = _get_dynamic_service()
+        if dynamic_svc:
+            try:
+                dynamic_cats = await dynamic_svc.get_all_categories()
+                for code, cat in dynamic_cats.items():
+                    categories.append(GSTCategoryResponse(
+                        code=code,
+                        name=cat.get('category_name', code),
+                        hsn_prefix=cat.get('hsn_prefix', ''),
+                        gst_rate=Decimal(str(cat.get('gst_rate', 18))),
+                        cess_rate=Decimal(str(cat.get('cess_rate', 0))),
+                        description=cat.get('description', '')
+                    ))
+                if categories:
+                    categories.sort(key=lambda c: (c.gst_rate, c.name))
+                    return categories
+            except Exception as e:
+                logger.warning(f"Dynamic category fetch failed, using static: {e}")
+
+        # Fallback to static config
         for key, cat in GST_CATEGORIES.items():
             categories.append(GSTCategoryResponse(
                 code=cat.code,
@@ -498,9 +581,9 @@ class GSTService:
         categories.sort(key=lambda c: (c.gst_rate, c.name))
         return categories
 
-    def get_hsn_info(self, hsn_code: str) -> Optional[GSTCategoryResponse]:
+    async def get_hsn_info(self, hsn_code: str) -> Optional[GSTCategoryResponse]:
         """
-        Get GST information for an HSN code.
+        Get GST information for an HSN code (dynamic with static fallback).
 
         Args:
             hsn_code: HSN code to lookup
@@ -508,7 +591,28 @@ class GSTService:
         Returns:
             GSTCategoryResponse if found, None otherwise
         """
-        category = get_gst_rate_from_hsn(hsn_code)
+        # Try dynamic service first
+        dynamic_svc = _get_dynamic_service()
+        if dynamic_svc:
+            try:
+                mapping = await dynamic_svc.get_hsn_mapping(hsn_code)
+                if mapping:
+                    category_code = mapping.get('category_code')
+                    cat = await dynamic_svc.get_category(category_code)
+                    if cat:
+                        return GSTCategoryResponse(
+                            code=category_code,
+                            name=cat.get('category_name', category_code),
+                            hsn_prefix=cat.get('hsn_prefix', ''),
+                            gst_rate=Decimal(str(cat.get('gst_rate', 18))),
+                            cess_rate=Decimal(str(cat.get('cess_rate', 0))),
+                            description=cat.get('description', '')
+                        )
+            except Exception as e:
+                logger.warning(f"Dynamic HSN lookup failed, using static: {e}")
+
+        # Fallback to static config
+        category = static_get_gst_rate_from_hsn(hsn_code)
         if category:
             return GSTCategoryResponse(
                 code=category.code,
@@ -520,9 +624,9 @@ class GSTService:
             )
         return None
 
-    def suggest_gst_category(self, product_name: str) -> Optional[GSTCategoryResponse]:
+    async def suggest_gst_category(self, product_name: str) -> Optional[GSTCategoryResponse]:
         """
-        Suggest GST category based on product name.
+        Suggest GST category based on product name (dynamic with static fallback).
 
         Args:
             product_name: Product name to analyze
@@ -530,7 +634,27 @@ class GSTService:
         Returns:
             GSTCategoryResponse if suggestion found, None otherwise
         """
-        category_key = suggest_category_from_product_name(product_name)
+        # Try dynamic service first
+        dynamic_svc = _get_dynamic_service()
+        if dynamic_svc:
+            try:
+                category_key = await dynamic_svc.suggest_category_from_product_name(product_name)
+                if category_key:
+                    cat = await dynamic_svc.get_category(category_key)
+                    if cat:
+                        return GSTCategoryResponse(
+                            code=category_key,
+                            name=cat.get('category_name', category_key),
+                            hsn_prefix=cat.get('hsn_prefix', ''),
+                            gst_rate=Decimal(str(cat.get('gst_rate', 18))),
+                            cess_rate=Decimal(str(cat.get('cess_rate', 0))),
+                            description=cat.get('description', '')
+                        )
+            except Exception as e:
+                logger.warning(f"Dynamic category suggestion failed, using static: {e}")
+
+        # Fallback to static config
+        category_key = static_suggest_category(product_name)
         if category_key and category_key in GST_CATEGORIES:
             cat = GST_CATEGORIES[category_key]
             return GSTCategoryResponse(
