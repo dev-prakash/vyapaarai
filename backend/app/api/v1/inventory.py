@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
@@ -8,6 +9,7 @@ import logging
 
 from app.services.inventory_service import inventory_service
 from app.core.security import get_current_store_owner
+from app.database.stats_repository import get_stats_repository
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 logger = logging.getLogger(__name__)
@@ -331,6 +333,172 @@ async def update_product(
         raise HTTPException(status_code=500, detail=f"Failed to update product: {str(e)}")
 
 
+@router.delete("/products/{product_id}")
+async def delete_product(
+    product_id: str,
+    hard_delete: bool = Query(False, description="Permanently delete instead of soft delete"),
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Delete a product from the store's inventory.
+
+    By default, performs soft delete (sets is_active=False).
+    Use hard_delete=true to permanently remove the product.
+
+    Works for both custom products and products added from global catalog.
+
+    Requires store owner authentication.
+    """
+    try:
+        store_id = current_user.get('store_id')
+        user_id = current_user.get('user_id')
+
+        if not store_id:
+            raise HTTPException(status_code=400, detail="Store ID not found in token")
+
+        # Check if product exists
+        existing_product = await inventory_service.get_product(store_id, product_id)
+        if not existing_product:
+            raise HTTPException(status_code=404, detail=f"Product {product_id} not found in store inventory")
+
+        # Use the delete method - it handles both custom and catalog products
+        result = await inventory_service.delete_custom_product(
+            store_id=store_id,
+            product_id=product_id,
+            user_id=user_id,
+            hard_delete=hard_delete
+        )
+
+        if not result.get('success'):
+            error_msg = result.get('error', 'Failed to delete product')
+            if 'Not authorized' in error_msg:
+                raise HTTPException(status_code=403, detail=error_msg)
+            elif 'Cannot delete' in error_msg:
+                raise HTTPException(status_code=400, detail=error_msg)
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
+
+        return {
+            "success": True,
+            "message": result.get('message'),
+            "hard_delete": result.get('hard_delete', False)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting product {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete product: {str(e)}")
+
+
+@router.post("/products/{product_id}/duplicate", status_code=201)
+async def duplicate_product(
+    product_id: str,
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Duplicate a product in the store's inventory.
+
+    Creates a copy of the product with:
+    - New unique product ID
+    - "(Copy)" suffix added to product name
+    - Stock reset to 0 (user should update stock separately)
+
+    Works for both custom products and products added from global catalog.
+
+    Requires store owner authentication.
+    """
+    try:
+        store_id = current_user.get('store_id')
+        user_id = current_user.get('user_id')
+
+        if not store_id:
+            raise HTTPException(status_code=400, detail="Store ID not found in token")
+
+        result = await inventory_service.duplicate_product(
+            store_id=store_id,
+            product_id=product_id,
+            user_id=user_id
+        )
+
+        if not result.get('success'):
+            error_msg = result.get('error', 'Failed to duplicate product')
+            if 'not found' in error_msg.lower():
+                raise HTTPException(status_code=404, detail=error_msg)
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
+
+        logger.info(f"Product duplicated: {product_id} -> {result.get('new_product_id')} for store {store_id}")
+
+        return {
+            "success": True,
+            "message": "Product duplicated successfully",
+            "original_product_id": product_id,
+            "new_product_id": result.get('new_product_id'),
+            "product": result.get('product')
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error duplicating product {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to duplicate product: {str(e)}")
+
+
+@router.put("/products/{product_id}/archive")
+async def archive_product(
+    product_id: str,
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Toggle archive status of a product in the store's inventory.
+
+    If product is active, it will be archived (is_active=False).
+    If product is archived, it will be unarchived (is_active=True).
+
+    Works for both custom products and products added from global catalog.
+
+    Requires store owner authentication.
+    """
+    try:
+        store_id = current_user.get('store_id')
+        user_id = current_user.get('user_id')
+
+        if not store_id:
+            raise HTTPException(status_code=400, detail="Store ID not found in token")
+
+        result = await inventory_service.archive_product(
+            store_id=store_id,
+            product_id=product_id,
+            user_id=user_id
+        )
+
+        if not result.get('success'):
+            error_msg = result.get('error', 'Failed to archive product')
+            if 'not found' in error_msg.lower():
+                raise HTTPException(status_code=404, detail=error_msg)
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
+
+        new_status = 'archived' if not result.get('is_active') else 'active'
+        action = 'archived' if new_status == 'archived' else 'unarchived'
+        logger.info(f"Product {action}: {product_id} for store {store_id}")
+
+        return {
+            "success": True,
+            "message": f"Product {action} successfully",
+            "product_id": product_id,
+            "status": new_status,
+            "is_active": result.get('is_active')
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error archiving product {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to archive product: {str(e)}")
+
+
 @router.get("/products/{store_id}/{product_id}/availability")
 async def check_availability(store_id: str, product_id: str, quantity: int = Query(..., ge=1)):
     """Check product availability for given quantity"""
@@ -431,6 +599,180 @@ async def get_cache_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
+
+
+# ==================== PRE-COMPUTED STATS ENDPOINTS ====================
+
+@router.get("/stats")
+async def get_precomputed_stats(
+    store_id: str = Query(..., description="Store ID")
+):
+    """
+    Get pre-computed inventory statistics for instant dashboard loading.
+
+    This endpoint reads from the vyaparai-store-stats table which maintains
+    running totals updated atomically on each inventory operation.
+
+    Response is O(1) - single DynamoDB GetItem operation.
+
+    Returns:
+    - total_products: Count of all products in inventory
+    - active_products: Count of non-archived products
+    - archived_products: Count of archived products
+    - total_stock_value: Sum of (selling_price × current_stock) for active products
+    - low_stock_count: Products below their min_stock_level
+    - out_of_stock_count: Products with 0 stock
+    - last_updated: Timestamp of last stats update
+    - last_reconciled: Timestamp of last batch reconciliation
+    """
+    try:
+        stats_repo = get_stats_repository()
+
+        # Try to get pre-computed stats
+        stats = await stats_repo.get_stats(store_id)
+
+        if stats:
+            # Stats exist - return them (instant response)
+            return {
+                "success": True,
+                "source": "precomputed",
+                "data": {
+                    "total_products": stats.get("total_products", 0),
+                    "active_products": stats.get("active_products", 0),
+                    "archived_products": stats.get("archived_products", 0),
+                    "total_stock_value": stats.get("total_stock_value", 0),
+                    "low_stock_count": stats.get("low_stock_count", 0),
+                    "out_of_stock_count": stats.get("out_of_stock_count", 0),
+                    "store_id": store_id
+                },
+                "metadata": {
+                    "last_updated": stats.get("last_updated"),
+                    "last_reconciled": stats.get("last_reconciled"),
+                    "version": stats.get("version", 0)
+                }
+            }
+
+        # Stats don't exist yet - compute from products and initialize
+        logger.info(f"No pre-computed stats for store {store_id}, computing from products...")
+        summary = await inventory_service.get_inventory_summary(store_id, skip_cache=True)
+
+        # Initialize stats in the stats table
+        initial_stats = {
+            "total_products": summary.get("total_products", 0),
+            "active_products": summary.get("active_products", 0),
+            "archived_products": summary.get("total_products", 0) - summary.get("active_products", 0),
+            "total_stock_value": summary.get("total_stock_value", 0),
+            "low_stock_count": summary.get("low_stock", 0),
+            "out_of_stock_count": summary.get("out_of_stock", 0)
+        }
+
+        try:
+            await stats_repo.set_stats(store_id, initial_stats)
+            logger.info(f"Initialized pre-computed stats for store {store_id}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize stats for store {store_id}: {e}")
+
+        return {
+            "success": True,
+            "source": "computed",
+            "data": {
+                "total_products": initial_stats["total_products"],
+                "active_products": initial_stats["active_products"],
+                "archived_products": initial_stats["archived_products"],
+                "total_stock_value": initial_stats["total_stock_value"],
+                "low_stock_count": initial_stats["low_stock_count"],
+                "out_of_stock_count": initial_stats["out_of_stock_count"],
+                "store_id": store_id
+            },
+            "metadata": {
+                "last_updated": None,
+                "last_reconciled": None,
+                "version": 1
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting pre-computed stats for store {store_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get inventory stats: {str(e)}")
+
+
+@router.post("/stats/recalculate")
+async def recalculate_stats(
+    store_id: str = Query(..., description="Store ID to recalculate stats for"),
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Force recalculation of pre-computed stats from current inventory.
+
+    This endpoint performs a full scan of the store's inventory and
+    updates the stats table with accurate values. Use this if stats
+    appear out of sync with actual inventory.
+
+    This is an expensive operation (O(n) where n = number of products).
+    Should only be used for manual corrections or scheduled reconciliation.
+
+    Requires store owner authentication.
+    """
+    try:
+        # Verify store ownership
+        user_store_id = current_user.get('store_id')
+        if user_store_id != store_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only recalculate stats for your own store"
+            )
+
+        # Compute fresh stats from inventory
+        logger.info(f"Recalculating stats for store {store_id}...")
+        summary = await inventory_service.get_inventory_summary(store_id, skip_cache=True)
+
+        # Calculate stats
+        total_products = summary.get("total_products", 0)
+        active_products = summary.get("active_products", 0)
+        archived_products = total_products - active_products
+
+        recalculated_stats = {
+            "total_products": total_products,
+            "active_products": active_products,
+            "archived_products": archived_products,
+            "total_stock_value": summary.get("total_stock_value", 0),
+            "low_stock_count": summary.get("low_stock", 0),
+            "out_of_stock_count": summary.get("out_of_stock", 0)
+        }
+
+        # Update stats table
+        stats_repo = get_stats_repository()
+        updated_stats = await stats_repo.set_stats(store_id, recalculated_stats)
+
+        # Invalidate any in-memory cache
+        inventory_service.invalidate_summary_cache(store_id)
+
+        logger.info(f"Stats recalculated for store {store_id}: {recalculated_stats}")
+
+        return {
+            "success": True,
+            "message": "Stats recalculated successfully",
+            "data": {
+                "total_products": recalculated_stats["total_products"],
+                "active_products": recalculated_stats["active_products"],
+                "archived_products": recalculated_stats["archived_products"],
+                "total_stock_value": recalculated_stats["total_stock_value"],
+                "low_stock_count": recalculated_stats["low_stock_count"],
+                "out_of_stock_count": recalculated_stats["out_of_stock_count"],
+                "store_id": store_id
+            },
+            "metadata": {
+                "last_updated": updated_stats.get("last_updated"),
+                "last_reconciled": updated_stats.get("last_reconciled"),
+                "version": updated_stats.get("version", 0)
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error recalculating stats for store {store_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to recalculate stats: {str(e)}")
 
 
 @router.post("/cache/invalidate")
@@ -1006,7 +1348,19 @@ async def add_product_from_catalog(
         if not result.get('success'):
             error_msg = result.get('error', 'Failed to add product')
             if 'already exists' in error_msg.lower():
-                raise HTTPException(status_code=409, detail=error_msg)
+                # Include existing product info for better UX
+                existing_product = result.get('existing_product', {})
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": error_msg,
+                        "error": "Product already exists in your inventory",
+                        "existing_product_id": existing_product.get('product_id'),
+                        "existing_product_name": existing_product.get('product_name'),
+                        "existing_sku": existing_product.get('sku'),
+                        "message": "This product is already in your inventory. Please update it instead."
+                    }
+                )
             elif 'not found' in error_msg.lower():
                 raise HTTPException(status_code=404, detail=error_msg)
             else:

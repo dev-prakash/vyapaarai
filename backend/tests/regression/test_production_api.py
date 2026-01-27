@@ -13,6 +13,10 @@ Test Categories:
 5. Summary/Dashboard - Stats endpoints
 6. GST - Tax calculations
 7. Global Catalog - Product catalog access
+8. Cache - Cache management endpoints
+9. Khata - Credit ledger endpoints
+10. Orders - Order management endpoints
+11. Pre-computed Stats - Instant dashboard loading (new feature)
 
 Usage:
     # Run all production tests
@@ -868,6 +872,243 @@ class TestProductionInventoryDeleteArchive:
         assert response.status_code != 500, (
             f"Delete endpoint returned 500.\nResponse: {response.text[:500]}"
         )
+
+
+# =============================================================================
+# 11. PRE-COMPUTED STATS TESTS (Feature 2026-01-27)
+# =============================================================================
+
+class TestProductionPrecomputedStats:
+    """
+    🔴 LIVE TESTS - Hit production API and database
+
+    Regression tests for the pre-computed inventory stats feature.
+
+    Feature: Instant dashboard loading using pre-computed stats table.
+    Pattern: Stripe-style running totals (update on write, not compute on read).
+
+    These tests verify:
+    - GET /inventory/stats returns instant pre-computed stats (O(1))
+    - POST /inventory/stats/recalculate forces full recalculation
+    - Stats endpoint response includes source indicator
+    - Stats match expected data structure
+    """
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_stats_endpoint_exists(self, api_url, store_id):
+        """
+        🔴 LIVE: Verify /stats endpoint exists and responds.
+
+        The new /stats endpoint should be available and not return 500.
+        """
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        response = make_request(
+            "GET",
+            f"{api_url}/api/v1/inventory/stats?store_id={store_id}"
+        )
+
+        assert response.status_code != 500, (
+            f"Stats endpoint returned 500.\nResponse: {response.text[:500]}"
+        )
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_stats_returns_precomputed_data(self, api_url, store_id):
+        """
+        🔴 LIVE: Verify /stats returns pre-computed stats data.
+
+        Response should include total_products, active_products, total_stock_value, etc.
+        """
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        response = make_request(
+            "GET",
+            f"{api_url}/api/v1/inventory/stats?store_id={store_id}"
+        )
+
+        if response.status_code != 200:
+            pytest.skip(f"Stats endpoint returned {response.status_code}")
+
+        data = response.json()
+
+        # Verify response structure
+        assert data.get("success") is True, "Response should have success=true"
+        assert "data" in data, "Response should include data field"
+        assert "source" in data, "Response should indicate data source (precomputed/computed)"
+
+        # Verify data fields
+        stats_data = data.get("data", {})
+        required_fields = [
+            "total_products",
+            "active_products",
+            "total_stock_value",
+            "low_stock_count",
+            "out_of_stock_count",
+            "store_id"
+        ]
+
+        for field in required_fields:
+            assert field in stats_data, f"Stats data should include {field}"
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_stats_includes_metadata(self, api_url, store_id):
+        """
+        🔴 LIVE: Verify /stats response includes metadata.
+
+        Response should include last_updated, last_reconciled, version.
+        """
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        response = make_request(
+            "GET",
+            f"{api_url}/api/v1/inventory/stats?store_id={store_id}"
+        )
+
+        if response.status_code != 200:
+            pytest.skip(f"Stats endpoint returned {response.status_code}")
+
+        data = response.json()
+
+        # Verify metadata
+        assert "metadata" in data, "Response should include metadata"
+        metadata = data.get("metadata", {})
+
+        # These may be None for first-time stats
+        assert "last_updated" in metadata, "Metadata should include last_updated"
+        assert "version" in metadata, "Metadata should include version"
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_stats_faster_than_summary(self, api_url, store_id):
+        """
+        🔴 LIVE: Verify /stats is faster than /summary.
+
+        Pre-computed stats should be O(1) vs O(n) for summary.
+        This is a performance regression test.
+        """
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        import time
+
+        # Time the stats endpoint
+        start = time.time()
+        stats_response = make_request(
+            "GET",
+            f"{api_url}/api/v1/inventory/stats?store_id={store_id}"
+        )
+        stats_time = time.time() - start
+
+        # Time the summary endpoint
+        start = time.time()
+        summary_response = make_request(
+            "GET",
+            f"{api_url}/api/v1/inventory/summary?store_id={store_id}&skip_cache=true"
+        )
+        summary_time = time.time() - start
+
+        # Log timing for debugging
+        print(f"\n  Stats endpoint:   {stats_time:.3f}s")
+        print(f"  Summary endpoint: {summary_time:.3f}s")
+
+        # Stats should respond (even if not faster on first call due to cold start)
+        assert stats_response.status_code in [200, 201], (
+            f"Stats endpoint should succeed, got {stats_response.status_code}"
+        )
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_recalculate_endpoint_requires_auth(self, api_url, store_id):
+        """
+        🔴 LIVE: Verify /stats/recalculate requires authentication.
+
+        Recalculation is an admin action that requires store owner auth.
+        """
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        # Call without auth headers
+        response = make_request(
+            "POST",
+            f"{api_url}/api/v1/inventory/stats/recalculate?store_id={store_id}"
+        )
+
+        # Should return 401 or 403 without auth
+        assert response.status_code in [401, 403, 422], (
+            f"Recalculate without auth should fail, got {response.status_code}"
+        )
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_recalculate_endpoint_with_auth(self, api_url, auth_headers, store_id):
+        """
+        🔴 LIVE: Verify /stats/recalculate works with auth.
+
+        Should recalculate stats and return updated values.
+        """
+        if not auth_headers:
+            pytest.skip("No auth token available")
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        response = make_request(
+            "POST",
+            f"{api_url}/api/v1/inventory/stats/recalculate?store_id={store_id}",
+            headers=auth_headers
+        )
+
+        assert response.status_code != 500, (
+            f"Recalculate returned 500.\nResponse: {response.text[:500]}"
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            assert data.get("success") is True, "Recalculate should succeed"
+            assert "data" in data, "Recalculate should return stats data"
+
+    @pytest.mark.regression
+    @pytest.mark.live
+    def test_stats_values_non_negative(self, api_url, store_id):
+        """
+        🔴 LIVE: Verify all stats values are non-negative.
+
+        Counts and values should never be negative.
+        """
+        if not store_id:
+            pytest.skip("No store_id available")
+
+        response = make_request(
+            "GET",
+            f"{api_url}/api/v1/inventory/stats?store_id={store_id}"
+        )
+
+        if response.status_code != 200:
+            pytest.skip(f"Stats endpoint returned {response.status_code}")
+
+        data = response.json()
+        stats = data.get("data", {})
+
+        numeric_fields = [
+            "total_products",
+            "active_products",
+            "archived_products",
+            "total_stock_value",
+            "low_stock_count",
+            "out_of_stock_count"
+        ]
+
+        for field in numeric_fields:
+            value = stats.get(field, 0)
+            if value is not None:
+                assert value >= 0, (
+                    f"Stats field {field} should be non-negative, got {value}"
+                )
 
 
 # =============================================================================

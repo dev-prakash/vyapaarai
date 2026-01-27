@@ -23,6 +23,7 @@ from boto3.dynamodb.conditions import Key, Attr
 from botocore.exceptions import ClientError
 
 from app.core.config import settings
+from app.database.stats_repository import get_stats_repository
 
 logger = logging.getLogger(__name__)
 
@@ -205,19 +206,235 @@ class InventoryService:
             self.use_mock = True
             self.dynamodb = None
 
+    # ==================== PRE-COMPUTED STATS UPDATES ====================
+    # These methods update the stats table atomically when inventory changes.
+    # Pattern: Stripe-style running totals (update on write, not compute on read)
+
+    async def _update_stats_on_product_add(
+        self,
+        store_id: str,
+        selling_price: float,
+        current_stock: int,
+        min_stock_level: int
+    ) -> None:
+        """
+        Update stats when a new product is added.
+
+        Args:
+            store_id: Store ID
+            selling_price: Product selling price
+            current_stock: Initial stock quantity
+            min_stock_level: Minimum stock level threshold
+        """
+        try:
+            stats_repo = get_stats_repository()
+            stock_value = selling_price * current_stock
+
+            # Determine stock status
+            is_out_of_stock = current_stock == 0
+            is_low_stock = 0 < current_stock <= min_stock_level
+
+            await stats_repo.update_stats_atomic(
+                store_id=store_id,
+                delta_total_products=1,
+                delta_active_products=1,
+                delta_stock_value=stock_value,
+                delta_out_of_stock=1 if is_out_of_stock else 0,
+                delta_low_stock=1 if is_low_stock else 0
+            )
+            logger.debug(f"Stats updated for product add in store {store_id}")
+
+        except Exception as e:
+            # Log but don't fail the main operation - stats can be reconciled later
+            logger.error(f"Error updating stats on product add: {e}")
+
+    async def _update_stats_on_product_delete(
+        self,
+        store_id: str,
+        product: Dict,
+        hard_delete: bool
+    ) -> None:
+        """
+        Update stats when a product is deleted.
+
+        Args:
+            store_id: Store ID
+            product: Product being deleted (to get price/stock info)
+            hard_delete: True if permanently deleted, False if soft deleted
+        """
+        try:
+            stats_repo = get_stats_repository()
+            selling_price = float(product.get('selling_price', 0))
+            current_stock = int(product.get('current_stock', 0))
+            min_stock_level = int(product.get('min_stock_level', 10))
+            was_active = product.get('is_active', True)
+
+            if not was_active:
+                # Product was already archived, nothing to update for active stats
+                if hard_delete:
+                    # Just decrement total and archived counts
+                    await stats_repo.update_stats_atomic(
+                        store_id=store_id,
+                        delta_total_products=-1,
+                        delta_archived_products=-1
+                    )
+                return
+
+            stock_value = selling_price * current_stock
+            is_out_of_stock = current_stock == 0
+            is_low_stock = 0 < current_stock <= min_stock_level
+
+            if hard_delete:
+                # Permanently deleted - remove from all counts
+                await stats_repo.update_stats_atomic(
+                    store_id=store_id,
+                    delta_total_products=-1,
+                    delta_active_products=-1,
+                    delta_stock_value=-stock_value,
+                    delta_out_of_stock=-1 if is_out_of_stock else 0,
+                    delta_low_stock=-1 if is_low_stock else 0
+                )
+            else:
+                # Soft deleted (archived) - move from active to archived
+                await stats_repo.update_stats_atomic(
+                    store_id=store_id,
+                    delta_active_products=-1,
+                    delta_archived_products=1,
+                    delta_stock_value=-stock_value,
+                    delta_out_of_stock=-1 if is_out_of_stock else 0,
+                    delta_low_stock=-1 if is_low_stock else 0
+                )
+
+            logger.debug(f"Stats updated for product delete in store {store_id}")
+
+        except Exception as e:
+            logger.error(f"Error updating stats on product delete: {e}")
+
+    async def _update_stats_on_archive_toggle(
+        self,
+        store_id: str,
+        product: Dict,
+        new_is_active: bool
+    ) -> None:
+        """
+        Update stats when a product is archived or unarchived.
+
+        Args:
+            store_id: Store ID
+            product: Product being toggled
+            new_is_active: New active status (True = unarchived, False = archived)
+        """
+        try:
+            stats_repo = get_stats_repository()
+            selling_price = float(product.get('selling_price', 0))
+            current_stock = int(product.get('current_stock', 0))
+            min_stock_level = int(product.get('min_stock_level', 10))
+
+            stock_value = selling_price * current_stock
+            is_out_of_stock = current_stock == 0
+            is_low_stock = 0 < current_stock <= min_stock_level
+
+            if new_is_active:
+                # Unarchiving - move from archived to active
+                await stats_repo.update_stats_atomic(
+                    store_id=store_id,
+                    delta_active_products=1,
+                    delta_archived_products=-1,
+                    delta_stock_value=stock_value,
+                    delta_out_of_stock=1 if is_out_of_stock else 0,
+                    delta_low_stock=1 if is_low_stock else 0
+                )
+            else:
+                # Archiving - move from active to archived
+                await stats_repo.update_stats_atomic(
+                    store_id=store_id,
+                    delta_active_products=-1,
+                    delta_archived_products=1,
+                    delta_stock_value=-stock_value,
+                    delta_out_of_stock=-1 if is_out_of_stock else 0,
+                    delta_low_stock=-1 if is_low_stock else 0
+                )
+
+            logger.debug(f"Stats updated for archive toggle in store {store_id}")
+
+        except Exception as e:
+            logger.error(f"Error updating stats on archive toggle: {e}")
+
+    async def _update_stats_on_stock_change(
+        self,
+        store_id: str,
+        product: Dict,
+        previous_stock: int,
+        new_stock: int
+    ) -> None:
+        """
+        Update stats when stock quantity changes.
+
+        Args:
+            store_id: Store ID
+            product: Product with updated stock
+            previous_stock: Stock before change
+            new_stock: Stock after change
+        """
+        try:
+            stats_repo = get_stats_repository()
+            selling_price = float(product.get('selling_price', 0))
+            min_stock_level = int(product.get('min_stock_level', 10))
+            is_active = product.get('is_active', True)
+
+            # Only update stats for active products
+            if not is_active:
+                return
+
+            # Calculate stock value delta
+            stock_value_delta = selling_price * (new_stock - previous_stock)
+
+            # Determine changes in stock status counts
+            was_out_of_stock = previous_stock == 0
+            is_out_of_stock = new_stock == 0
+            was_low_stock = 0 < previous_stock <= min_stock_level
+            is_low_stock = 0 < new_stock <= min_stock_level
+
+            delta_out_of_stock = 0
+            if was_out_of_stock and not is_out_of_stock:
+                delta_out_of_stock = -1  # No longer out of stock
+            elif not was_out_of_stock and is_out_of_stock:
+                delta_out_of_stock = 1  # Now out of stock
+
+            delta_low_stock = 0
+            if was_low_stock and not is_low_stock:
+                delta_low_stock = -1  # No longer low stock
+            elif not was_low_stock and is_low_stock:
+                delta_low_stock = 1  # Now low stock
+
+            await stats_repo.update_stats_atomic(
+                store_id=store_id,
+                delta_stock_value=stock_value_delta,
+                delta_out_of_stock=delta_out_of_stock,
+                delta_low_stock=delta_low_stock
+            )
+
+            logger.debug(f"Stats updated for stock change in store {store_id}: "
+                        f"{previous_stock} -> {new_stock}")
+
+        except Exception as e:
+            logger.error(f"Error updating stats on stock change: {e}")
+
     async def get_products(self, store_id: str, category: str = None,
                           status: str = None, search: str = None,
-                          page: int = 1, limit: int = 50) -> Dict:
+                          page: int = 1, limit: int = 50,
+                          include_inactive: bool = False) -> Dict:
         """
         Get products for a store with filtering and pagination
 
         Args:
             store_id: Store ID to get inventory for
             category: Filter by category
-            status: Filter by status
+            status: Filter by status ('active', 'inactive', 'archived', 'all')
             search: Search term for product name
             page: Page number (1-indexed)
             limit: Items per page
+            include_inactive: If True, include soft-deleted/archived products
         """
         if self.use_mock:
             return self._get_mock_response()
@@ -235,6 +452,26 @@ class InventoryService:
             # Apply filters
             filtered_products = []
             for product in products:
+                # By default, filter out soft-deleted products (is_active=False)
+                # unless include_inactive is True or status explicitly requests them
+                product_is_active = product.get('is_active', True)
+
+                if status == 'all':
+                    # Show all products regardless of is_active
+                    pass
+                elif status == 'archived' or status == 'inactive':
+                    # Only show archived/inactive products
+                    if product_is_active:
+                        continue
+                elif status == 'active':
+                    # Only show active products
+                    if not product_is_active:
+                        continue
+                else:
+                    # Default behavior: only show active products unless include_inactive
+                    if not include_inactive and not product_is_active:
+                        continue
+
                 # Get global product data if needed for search/category
                 if search or category:
                     global_product = await self._get_global_product(product['product_id'])
@@ -245,13 +482,6 @@ class InventoryService:
                 if category:
                     product_category = product.get('global_data', {}).get('category', '')
                     if category.lower() not in product_category.lower():
-                        continue
-
-                # Status filter
-                if status:
-                    if status == 'active' and not product.get('is_active', True):
-                        continue
-                    elif status == 'inactive' and product.get('is_active', True):
                         continue
 
                 # Search filter
@@ -414,6 +644,14 @@ class InventoryService:
                         # Invalidate cache after stock change
                         self.invalidate_summary_cache(store_id)
 
+                        # Update pre-computed stats
+                        await self._update_stats_on_stock_change(
+                            store_id=store_id,
+                            product=updated_product,
+                            previous_stock=previous_stock,
+                            new_stock=new_stock
+                        )
+
                         return {
                             "success": True,
                             "previous_stock": previous_stock,
@@ -473,6 +711,14 @@ class InventoryService:
 
                     # Invalidate cache after stock change
                     self.invalidate_summary_cache(store_id)
+
+                    # Update pre-computed stats
+                    await self._update_stats_on_stock_change(
+                        store_id=store_id,
+                        product=updated_product,
+                        previous_stock=previous_stock,
+                        new_stock=new_stock
+                    )
 
                     return {
                         "success": True,
@@ -787,23 +1033,30 @@ class InventoryService:
 
             products = response.get('Items', [])
 
-            total_products = len(products)
-            active_products = sum(1 for p in products if p.get('is_active', True))
-            out_of_stock = sum(1 for p in products if int(p.get('current_stock', 0)) == 0)
+            # Filter to only active products for all metrics
+            active_products_list = [p for p in products if p.get('is_active', True)]
+
+            total_products = len(active_products_list)
+            active_products = total_products  # All counted products are active
+            out_of_stock = sum(1 for p in active_products_list if int(p.get('current_stock', 0)) == 0)
             low_stock = sum(
-                1 for p in products
+                1 for p in active_products_list
                 if 0 < int(p.get('current_stock', 0)) <= int(p.get('min_stock_level', 10))
             )
 
-            # Calculate total inventory value
+            # Calculate total inventory value (only for active products)
             total_value = sum(
                 int(p.get('current_stock', 0)) * float(p.get('selling_price', 0))
-                for p in products
+                for p in active_products_list
             )
+
+            # Count archived products separately
+            archived_count = len(products) - total_products
 
             summary = {
                 "total_products": total_products,
                 "active_products": active_products,
+                "archived_products": archived_count,
                 "out_of_stock": out_of_stock,
                 "low_stock": low_stock,
                 "total_stock_value": round(total_value, 2)
@@ -980,6 +1233,14 @@ class InventoryService:
             # Invalidate cache after creating new product
             self.invalidate_summary_cache(store_id)
 
+            # Update pre-computed stats (async, non-blocking for main operation)
+            await self._update_stats_on_product_add(
+                store_id=store_id,
+                selling_price=float(product_item.get('selling_price', 0)),
+                current_stock=int(product_item.get('current_stock', 0)),
+                min_stock_level=int(product_item.get('min_stock_level', 10))
+            )
+
             return {
                 "success": True,
                 "product_id": product_id,
@@ -1138,16 +1399,19 @@ class InventoryService:
         hard_delete: bool = False
     ) -> Dict:
         """
-        Delete (or soft-delete) a store-specific custom product.
+        Delete (or soft-delete) a product from store inventory.
 
         By default, performs soft delete (sets is_active=False).
-        Hard delete removes the item completely.
+        Hard delete removes the item completely (only for custom products).
+
+        Works for both custom products and products added from global catalog.
+        Global catalog products can only be soft-deleted (removed from store inventory view).
 
         Args:
             store_id: Store ID
             product_id: Product ID to delete
             user_id: User making the deletion
-            hard_delete: If True, permanently removes the product
+            hard_delete: If True, permanently removes the product (custom products only)
 
         Returns:
             Dict with success status
@@ -1156,17 +1420,21 @@ class InventoryService:
             return {"success": False, "error": "Mock mode - cannot delete products"}
 
         try:
-            # Verify the product exists and is a custom product owned by this store
+            # Verify the product exists in this store's inventory
             existing_product = await self.get_product(store_id, product_id)
 
             if not existing_product:
                 return {"success": False, "error": "Product not found"}
 
-            if existing_product.get('product_source') != PRODUCT_SOURCE_CUSTOM:
-                return {"success": False, "error": "Cannot delete global catalog products"}
+            is_custom = existing_product.get('product_source') == PRODUCT_SOURCE_CUSTOM
 
-            if existing_product.get('source_store_id') != store_id:
+            # For custom products, verify ownership
+            if is_custom and existing_product.get('source_store_id') != store_id:
                 return {"success": False, "error": "Not authorized to delete this product"}
+
+            # Hard delete only allowed for custom products
+            if hard_delete and not is_custom:
+                return {"success": False, "error": "Cannot hard delete global catalog products. Use soft delete instead."}
 
             if hard_delete:
                 # Permanently delete the product
@@ -1182,6 +1450,13 @@ class InventoryService:
 
                 # Invalidate cache after product deletion
                 self.invalidate_summary_cache(store_id)
+
+                # Update pre-computed stats
+                await self._update_stats_on_product_delete(
+                    store_id=store_id,
+                    product=existing_product,
+                    hard_delete=True
+                )
 
                 return {
                     "success": True,
@@ -1209,6 +1484,13 @@ class InventoryService:
                 # Invalidate cache after product deactivation
                 self.invalidate_summary_cache(store_id)
 
+                # Update pre-computed stats (soft delete = archive)
+                await self._update_stats_on_product_delete(
+                    store_id=store_id,
+                    product=existing_product,
+                    hard_delete=False
+                )
+
                 return {
                     "success": True,
                     "message": "Product deactivated (soft deleted)",
@@ -1221,6 +1503,210 @@ class InventoryService:
             return {"success": False, "error": f"Database error: {error_code}"}
         except Exception as e:
             logger.error(f"Error deleting custom product: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def duplicate_product(
+        self,
+        store_id: str,
+        product_id: str,
+        user_id: str
+    ) -> Dict:
+        """
+        Duplicate a product in the store's inventory.
+
+        Creates a copy of the product with:
+        - New unique product ID
+        - "(Copy)" suffix added to product name
+        - Stock reset to 0
+
+        Works for both custom products and products added from global catalog.
+
+        Args:
+            store_id: Store ID
+            product_id: Product ID to duplicate
+            user_id: User making the duplication
+
+        Returns:
+            Dict with success status and new product details
+        """
+        if self.use_mock:
+            return {"success": False, "error": "Mock mode - cannot duplicate products"}
+
+        try:
+            # Get the source product
+            source_product = await self.get_product(store_id, product_id)
+
+            if not source_product:
+                return {"success": False, "error": "Product not found"}
+
+            # Generate new product ID
+            new_product_id = self._generate_custom_product_id()
+            now = datetime.utcnow().isoformat()
+
+            # Create the duplicate product
+            duplicate_item = dict(source_product)
+
+            # Update keys and metadata for the duplicate
+            duplicate_item['store_id'] = store_id
+            duplicate_item['product_id'] = new_product_id
+
+            # Add "(Copy)" to the name
+            original_name = duplicate_item.get('product_name', duplicate_item.get('name', 'Product'))
+            duplicate_item['product_name'] = f"{original_name} (Copy)"
+
+            # Reset stock to 0 - user should set initial stock
+            duplicate_item['current_stock'] = 0
+
+            # Mark as custom product (duplicates are always store-specific)
+            duplicate_item['product_source'] = PRODUCT_SOURCE_CUSTOM
+            duplicate_item['source_store_id'] = store_id
+            duplicate_item['visibility'] = VISIBILITY_STORE_ONLY
+            duplicate_item['promotion_status'] = PROMOTION_STATUS_NONE
+
+            # Update timestamps and creator
+            duplicate_item['created_at'] = now
+            duplicate_item['updated_at'] = now
+            duplicate_item['created_by_user_id'] = user_id
+            duplicate_item['duplicated_from'] = product_id
+
+            # Generate new SKU
+            duplicate_item['sku'] = self._generate_sku(
+                duplicate_item.get('product_name', 'Product'),
+                store_id
+            )
+
+            # Remove global_data if present (it's for display only)
+            duplicate_item.pop('global_data', None)
+
+            # Convert numeric fields to Decimal for DynamoDB
+            for field in ['selling_price', 'cost_price', 'mrp', 'tax_rate', 'discount_percentage',
+                         'gst_rate', 'cess_rate']:
+                if field in duplicate_item and duplicate_item[field] is not None:
+                    duplicate_item[field] = Decimal(str(duplicate_item[field]))
+
+            for field in ['current_stock', 'min_stock_level', 'max_stock_level']:
+                if field in duplicate_item and duplicate_item[field] is not None:
+                    duplicate_item[field] = int(duplicate_item[field])
+
+            # Remove empty string values
+            duplicate_item = {k: v for k, v in duplicate_item.items()
+                           if v is not None and v != '' and v != {}}
+
+            # Save the duplicate to DynamoDB
+            await asyncio.to_thread(
+                self.store_inventory_table.put_item,
+                Item=duplicate_item
+            )
+
+            logger.info(
+                f"Product duplicated: {product_id} -> {new_product_id} in store {store_id} | "
+                f"Duplicated by: {user_id}"
+            )
+
+            # Invalidate cache after creating new product
+            self.invalidate_summary_cache(store_id)
+
+            # Update pre-computed stats (duplicated product is a new product)
+            await self._update_stats_on_product_add(
+                store_id=store_id,
+                selling_price=float(duplicate_item.get('selling_price', 0)),
+                current_stock=int(duplicate_item.get('current_stock', 0)),
+                min_stock_level=int(duplicate_item.get('min_stock_level', 10))
+            )
+
+            return {
+                "success": True,
+                "new_product_id": new_product_id,
+                "product": decimal_to_float(duplicate_item),
+                "message": "Product duplicated successfully"
+            }
+
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            logger.error(f"DynamoDB error duplicating product: {error_code} - {e}")
+            return {"success": False, "error": f"Database error: {error_code}"}
+        except Exception as e:
+            logger.error(f"Error duplicating product: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def archive_product(
+        self,
+        store_id: str,
+        product_id: str,
+        user_id: str
+    ) -> Dict:
+        """
+        Toggle archive status of a product in the store's inventory.
+
+        If product is active (is_active=True), it will be archived (is_active=False).
+        If product is archived (is_active=False), it will be unarchived (is_active=True).
+
+        Works for both custom products and products added from global catalog.
+
+        Args:
+            store_id: Store ID
+            product_id: Product ID to archive/unarchive
+            user_id: User making the change
+
+        Returns:
+            Dict with success status and new is_active state
+        """
+        if self.use_mock:
+            return {"success": False, "error": "Mock mode - cannot archive products"}
+
+        try:
+            # Get the product
+            existing_product = await self.get_product(store_id, product_id)
+
+            if not existing_product:
+                return {"success": False, "error": "Product not found"}
+
+            # Toggle the is_active status
+            current_status = existing_product.get('is_active', True)
+            new_status = not current_status
+            now = datetime.utcnow().isoformat()
+
+            # Update the product
+            await asyncio.to_thread(
+                self.store_inventory_table.update_item,
+                Key={'store_id': store_id, 'product_id': product_id},
+                UpdateExpression='SET is_active = :status, updated_at = :updated_at, archived_by = :user_id',
+                ExpressionAttributeValues={
+                    ':status': new_status,
+                    ':updated_at': now,
+                    ':user_id': user_id
+                }
+            )
+
+            action = 'unarchived' if new_status else 'archived'
+            logger.info(
+                f"Product {action}: {product_id} in store {store_id} | "
+                f"Changed by: {user_id}"
+            )
+
+            # Invalidate cache after status change
+            self.invalidate_summary_cache(store_id)
+
+            # Update pre-computed stats
+            await self._update_stats_on_archive_toggle(
+                store_id=store_id,
+                product=existing_product,
+                new_is_active=new_status
+            )
+
+            return {
+                "success": True,
+                "is_active": new_status,
+                "status": "active" if new_status else "archived",
+                "message": f"Product {action} successfully"
+            }
+
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            logger.error(f"DynamoDB error archiving product: {error_code} - {e}")
+            return {"success": False, "error": f"Database error: {error_code}"}
+        except Exception as e:
+            logger.error(f"Error archiving product: {e}")
             return {"success": False, "error": str(e)}
 
     def filter_visible_products(
@@ -1611,6 +2097,14 @@ class InventoryService:
 
             # Invalidate cache after adding new product
             self.invalidate_summary_cache(store_id)
+
+            # Update pre-computed stats
+            await self._update_stats_on_product_add(
+                store_id=store_id,
+                selling_price=float(inventory_item.get('selling_price', 0)),
+                current_stock=int(inventory_item.get('current_stock', 0)),
+                min_stock_level=int(inventory_item.get('min_stock_level', 10))
+            )
 
             return {
                 "success": True,
