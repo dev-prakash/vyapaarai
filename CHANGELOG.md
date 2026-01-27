@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Inventory Delete Action** - Delete now permanently removes products from database instead of soft-deleting
+  - Frontend now passes `hard_delete=true` to the API for permanent deletion
+  - Archive action (soft delete) remains available for temporarily hiding products
+  - Clear warning dialog distinguishes permanent deletion from archiving
+
+### Added
+- **Archived Inventory View** - Store owners can now view and restore archived products
+  - New "Archived" option in the status filter dropdown
+  - Visual banner when viewing archived products
+  - Unarchive action to restore products from archive view
+
+### Changed
+- **Inventory Table UI** - Removed SKU column to save space
+  - Product image is already shown in the Product column
+  - SKU available in product details if needed
+
+### Tests
+- Added 10 regression tests for inventory delete and archive functionality
+  - Hard delete verification (permanent removal)
+  - Soft delete verification (is_active=false)
+  - Global catalog protection (no hard delete)
+  - Archive/unarchive toggle
+  - Status filter behavior
+
 ---
 
 ## [0.3.0] - 2026-01-25
