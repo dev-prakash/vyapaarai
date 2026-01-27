@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
@@ -6,6 +6,10 @@ from decimal import Decimal
 import json
 import boto3
 import logging
+import csv
+import io
+import uuid
+from datetime import datetime
 
 from app.services.inventory_service import inventory_service
 from app.core.security import get_current_store_owner
@@ -1424,3 +1428,334 @@ async def add_product_from_catalog(
     except Exception as e:
         logger.error(f"Error adding product from catalog: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to add product to inventory: {str(e)}")
+
+
+# ==================== BULK UPLOAD ENDPOINTS ====================
+
+# In-memory job storage (in production, use DynamoDB or Redis)
+bulk_upload_jobs: Dict[str, Dict] = {}
+
+
+class BulkUploadJobStatus(BaseModel):
+    """Schema for bulk upload job status"""
+    jobId: str
+    status: str  # pending, processing, completed, failed
+    progress: Dict[str, Any]
+    results: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    startedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+
+
+@router.post("/bulk-upload/csv", status_code=201)
+async def upload_csv_for_bulk_import(
+    file: UploadFile = File(...),
+    store_id: str = Form(...),
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Upload a CSV file for bulk product import.
+
+    The CSV should have the following columns:
+    - product_name (required)
+    - brand_name
+    - sku
+    - barcode
+    - selling_price (required)
+    - cost_price
+    - mrp
+    - current_stock (required)
+    - min_stock_level
+    - max_stock_level
+    - size_unit
+    - description
+    - category
+    - tax_rate
+    - discount_percentage
+    - is_returnable
+    - is_perishable
+    - status
+    - image_path (optional, for future image upload support)
+
+    Returns a job ID to track the import progress.
+    """
+    try:
+        user_store_id = current_user.get('store_id')
+        user_id = current_user.get('user_id')
+
+        if not user_store_id:
+            raise HTTPException(status_code=400, detail="Store ID not found in token")
+
+        # Validate store_id matches token
+        if store_id != user_store_id:
+            raise HTTPException(status_code=403, detail="Store ID mismatch")
+
+        # Validate file type
+        if not file.filename.lower().endswith('.csv'):
+            raise HTTPException(status_code=400, detail="File must be a CSV file")
+
+        # Read file content
+        content = await file.read()
+
+        # Check file size (max 10MB)
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File size must be less than 10MB")
+
+        # Decode and parse CSV
+        try:
+            decoded_content = content.decode('utf-8-sig')  # Handle BOM
+        except UnicodeDecodeError:
+            decoded_content = content.decode('latin-1')
+
+        csv_reader = csv.DictReader(io.StringIO(decoded_content))
+        rows = list(csv_reader)
+
+        if len(rows) == 0:
+            raise HTTPException(status_code=400, detail="CSV file is empty or has no data rows")
+
+        # Validate required fields
+        required_fields = ['product_name', 'selling_price', 'current_stock']
+        headers = [h.lower().strip() for h in csv_reader.fieldnames or []]
+
+        missing_fields = [f for f in required_fields if f not in headers]
+        if missing_fields:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required fields: {', '.join(missing_fields)}"
+            )
+
+        # Generate job ID
+        job_id = f"BULK-{uuid.uuid4().hex[:12].upper()}"
+
+        # Initialize job status
+        bulk_upload_jobs[job_id] = {
+            'jobId': job_id,
+            'status': 'processing',
+            'progress': {
+                'total': len(rows),
+                'processed': 0,
+                'successful': 0,
+                'failed': 0,
+                'currentRecord': None
+            },
+            'results': {
+                'successfulProducts': [],
+                'failedProducts': []
+            },
+            'error': None,
+            'startedAt': datetime.utcnow().isoformat(),
+            'completedAt': None
+        }
+
+        # Process rows synchronously (for Lambda, we process immediately)
+        successful_products = []
+        failed_products = []
+
+        for idx, row in enumerate(rows):
+            try:
+                # Normalize column names
+                normalized_row = {k.lower().strip(): v.strip() if v else '' for k, v in row.items()}
+
+                product_name = normalized_row.get('product_name', '').strip()
+                selling_price_str = normalized_row.get('selling_price', '0').strip()
+                current_stock_str = normalized_row.get('current_stock', '0').strip()
+
+                # Validate required fields
+                if not product_name:
+                    failed_products.append({
+                        'row': idx + 2,  # +2 for header and 0-index
+                        'data': row,
+                        'error': 'Product name is required'
+                    })
+                    continue
+
+                try:
+                    selling_price = float(selling_price_str) if selling_price_str else 0
+                except ValueError:
+                    failed_products.append({
+                        'row': idx + 2,
+                        'data': row,
+                        'error': f'Invalid selling price: {selling_price_str}'
+                    })
+                    continue
+
+                if selling_price <= 0:
+                    failed_products.append({
+                        'row': idx + 2,
+                        'data': row,
+                        'error': 'Selling price must be greater than 0'
+                    })
+                    continue
+
+                try:
+                    current_stock = int(float(current_stock_str)) if current_stock_str else 0
+                except ValueError:
+                    failed_products.append({
+                        'row': idx + 2,
+                        'data': row,
+                        'error': f'Invalid stock quantity: {current_stock_str}'
+                    })
+                    continue
+
+                # Parse optional fields
+                cost_price_str = normalized_row.get('cost_price', '0').strip()
+                mrp_str = normalized_row.get('mrp', '0').strip()
+                min_stock_str = normalized_row.get('min_stock_level', '10').strip()
+                max_stock_str = normalized_row.get('max_stock_level', '100').strip()
+                tax_rate_str = normalized_row.get('tax_rate', '0').strip()
+                discount_str = normalized_row.get('discount_percentage', '0').strip()
+
+                try:
+                    cost_price = float(cost_price_str) if cost_price_str else 0
+                    mrp = float(mrp_str) if mrp_str else selling_price
+                    min_stock_level = int(float(min_stock_str)) if min_stock_str else 10
+                    max_stock_level = int(float(max_stock_str)) if max_stock_str else 100
+                    tax_rate = float(tax_rate_str) if tax_rate_str else 0
+                    discount_percentage = float(discount_str) if discount_str else 0
+                except ValueError as e:
+                    failed_products.append({
+                        'row': idx + 2,
+                        'data': row,
+                        'error': f'Invalid numeric value: {str(e)}'
+                    })
+                    continue
+
+                # Parse boolean fields
+                is_returnable = normalized_row.get('is_returnable', 'true').lower() in ('true', '1', 'yes')
+                is_perishable = normalized_row.get('is_perishable', 'false').lower() in ('true', '1', 'yes')
+
+                # Build product data
+                product_data = {
+                    'product_name': product_name,
+                    'brand': normalized_row.get('brand_name', '').strip(),
+                    'sku': normalized_row.get('sku', '').strip(),
+                    'barcode': normalized_row.get('barcode', '').strip(),
+                    'selling_price': selling_price,
+                    'cost_price': cost_price,
+                    'mrp': mrp,
+                    'current_stock': current_stock,
+                    'min_stock_level': min_stock_level,
+                    'max_stock_level': max_stock_level,
+                    'unit': normalized_row.get('size_unit', 'pieces').strip() or 'pieces',
+                    'description': normalized_row.get('description', '').strip(),
+                    'category': normalized_row.get('category', 'General').strip() or 'General',
+                    'tax_rate': tax_rate,
+                    'discount_percentage': discount_percentage,
+                    'is_returnable': is_returnable,
+                    'is_perishable': is_perishable,
+                    'is_active': normalized_row.get('status', 'active').lower() != 'inactive'
+                }
+
+                # Create custom product
+                result = await inventory_service.create_custom_product(
+                    store_id=user_store_id,
+                    user_id=user_id,
+                    product_data=product_data
+                )
+
+                if result.get('success'):
+                    successful_products.append({
+                        'row': idx + 2,
+                        'product_id': result.get('product_id'),
+                        'product_name': product_name,
+                        'sku': result.get('sku')
+                    })
+                else:
+                    failed_products.append({
+                        'row': idx + 2,
+                        'data': row,
+                        'error': result.get('error', 'Failed to create product')
+                    })
+
+            except Exception as e:
+                failed_products.append({
+                    'row': idx + 2,
+                    'data': row,
+                    'error': str(e)
+                })
+
+            # Update progress
+            bulk_upload_jobs[job_id]['progress']['processed'] = idx + 1
+            bulk_upload_jobs[job_id]['progress']['successful'] = len(successful_products)
+            bulk_upload_jobs[job_id]['progress']['failed'] = len(failed_products)
+            bulk_upload_jobs[job_id]['progress']['currentRecord'] = product_name
+
+        # Update final job status
+        bulk_upload_jobs[job_id]['status'] = 'completed'
+        bulk_upload_jobs[job_id]['completedAt'] = datetime.utcnow().isoformat()
+        bulk_upload_jobs[job_id]['results'] = {
+            'successfulProducts': successful_products,
+            'failedProducts': failed_products
+        }
+
+        logger.info(f"Bulk upload completed: {len(successful_products)} successful, {len(failed_products)} failed")
+
+        return {
+            'success': True,
+            'jobId': job_id,
+            'message': f'Bulk upload completed. {len(successful_products)} products added, {len(failed_products)} failed.',
+            'totalRecords': len(rows),
+            'estimatedTime': '0 seconds'
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in bulk CSV upload: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Bulk upload failed: {str(e)}")
+
+
+@router.get("/bulk-upload/status/{job_id}")
+async def get_bulk_upload_status(
+    job_id: str,
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Get the status of a bulk upload job.
+    """
+    try:
+        if job_id not in bulk_upload_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        return bulk_upload_jobs[job_id]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting bulk upload status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get job status: {str(e)}")
+
+
+@router.delete("/bulk-upload/cancel/{job_id}")
+async def cancel_bulk_upload(
+    job_id: str,
+    current_user: dict = Depends(get_current_store_owner)
+):
+    """
+    Cancel a running bulk upload job.
+    """
+    try:
+        if job_id not in bulk_upload_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        job = bulk_upload_jobs[job_id]
+
+        if job['status'] in ('completed', 'failed'):
+            raise HTTPException(status_code=400, detail=f"Job is already {job['status']}")
+
+        job['status'] = 'failed'
+        job['error'] = 'Cancelled by user'
+        job['completedAt'] = datetime.utcnow().isoformat()
+
+        return {
+            'success': True,
+            'message': f'Job {job_id} has been cancelled'
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling bulk upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
