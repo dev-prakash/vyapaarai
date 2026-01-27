@@ -128,9 +128,33 @@ fix/y ────────────────┘
 
 ## Test Standards
 
+### Test Type Disclosure (MANDATORY)
+
+**ALWAYS tell the user what type of test is being created:**
+
+| Type | Description | When to Use |
+|------|-------------|-------------|
+| **🔴 LIVE** | Hits production API/database | Critical user flows, deployment verification |
+| **🟡 MOCK** | Uses MagicMock/AsyncMock | Expensive operations, destructive tests, unit logic |
+| **🟢 STATIC** | AST/code analysis | Syntax validation, config checks (pre-deploy) |
+
+**Example disclosure:**
+```
+Creating 3 tests:
+- test_delete_product_permanently_removes → 🔴 LIVE (hits production API)
+- test_archive_toggle_logic → 🟡 MOCK (unit test with mocks)
+- test_endpoint_has_hard_delete_param → 🟢 STATIC (AST analysis)
+```
+
+**Decision criteria:**
+- Use 🔴 LIVE for: Authentication, CRUD operations, API contracts
+- Use 🟡 MOCK for: Complex business logic, edge cases, error handling
+- Use 🟢 STATIC for: Syntax errors, missing endpoints, config issues
+
 ### Markers
-- `@pytest.mark.unit` - Fast isolated tests
+- `@pytest.mark.unit` - Fast isolated tests (mock-based)
 - `@pytest.mark.regression` - Critical path tests (MUST pass before deploy)
+- `@pytest.mark.live` - Tests that hit production API/database
 - `@pytest.mark.integration` - Tests requiring external services
 
 ### Naming Convention
