@@ -558,3 +558,406 @@ class TestDependencyVersions:
         assert major >= 0 and (major > 0 or int(parts[1]) >= 100), (
             f"FastAPI 0.100+ recommended for Pydantic v2, found v{version}"
         )
+
+
+class TestInventoryMoreActionsEndpoints:
+    """
+    CRITICAL: Test that inventory "More Actions" endpoints exist and are correctly configured.
+
+    These endpoints support the frontend's More Actions menu:
+    - Delete product
+    - Duplicate product
+    - Archive/Unarchive product
+
+    Bug History:
+    - 2026-01-26: More Actions menu not working because DELETE, POST /duplicate,
+      PUT /archive endpoints were missing. Frontend received 404/405 errors.
+    """
+
+    @pytest.mark.regression
+    def test_delete_product_endpoint_exists(self):
+        """
+        CRITICAL: Verify DELETE /products/{product_id} endpoint exists.
+
+        This caught the "More Actions > Delete" bug on 2026-01-26.
+        Frontend calls DELETE /api/v1/inventory/products/{productId} but
+        this endpoint was missing.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for DELETE /products/{product_id} endpoint
+        delete_pattern = r'@router\.delete\s*\(\s*["\']\/products\/\{product_id\}["\']'
+        match = re.search(delete_pattern, source)
+
+        assert match is not None, (
+            "Missing DELETE /products/{product_id} endpoint in inventory.py.\n"
+            "Frontend requires this endpoint for 'More Actions > Delete'.\n"
+            "Add @router.delete('/products/{product_id}') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_duplicate_product_endpoint_exists(self):
+        """
+        CRITICAL: Verify POST /products/{product_id}/duplicate endpoint exists.
+
+        This caught the "More Actions > Duplicate" bug on 2026-01-26.
+        Frontend calls POST /api/v1/inventory/products/{productId}/duplicate
+        but this endpoint was missing.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for POST /products/{product_id}/duplicate endpoint
+        duplicate_pattern = r'@router\.post\s*\(\s*["\']\/products\/\{product_id\}\/duplicate["\']'
+        match = re.search(duplicate_pattern, source)
+
+        assert match is not None, (
+            "Missing POST /products/{product_id}/duplicate endpoint in inventory.py.\n"
+            "Frontend requires this endpoint for 'More Actions > Duplicate'.\n"
+            "Add @router.post('/products/{product_id}/duplicate') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_archive_product_endpoint_exists(self):
+        """
+        CRITICAL: Verify PUT /products/{product_id}/archive endpoint exists.
+
+        This caught the "More Actions > Archive" bug on 2026-01-26.
+        Frontend calls PUT /api/v1/inventory/products/{productId}/archive
+        but this endpoint was missing.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for PUT /products/{product_id}/archive endpoint
+        archive_pattern = r'@router\.put\s*\(\s*["\']\/products\/\{product_id\}\/archive["\']'
+        match = re.search(archive_pattern, source)
+
+        assert match is not None, (
+            "Missing PUT /products/{product_id}/archive endpoint in inventory.py.\n"
+            "Frontend requires this endpoint for 'More Actions > Archive'.\n"
+            "Add @router.put('/products/{product_id}/archive') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_inventory_service_has_duplicate_method(self):
+        """
+        CRITICAL: Verify InventoryService has duplicate_product method.
+
+        The duplicate endpoint requires this service method to create a copy
+        of the product with a new ID and "(Copy)" suffix.
+        """
+        import ast
+
+        service_file = os.path.join(backend_dir, 'app/services/inventory_service.py')
+
+        with open(service_file, 'r') as f:
+            source = f.read()
+
+        tree = ast.parse(source)
+
+        # Find InventoryService class and check for duplicate_product method
+        found_method = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == 'duplicate_product':
+                found_method = True
+                break
+
+        assert found_method, (
+            "Missing duplicate_product method in InventoryService.\n"
+            "This method is required to create a copy of an existing product."
+        )
+
+    @pytest.mark.regression
+    def test_inventory_service_has_archive_method(self):
+        """
+        CRITICAL: Verify InventoryService has archive_product method.
+
+        The archive endpoint requires this service method to toggle
+        the product's is_active status.
+        """
+        import ast
+
+        service_file = os.path.join(backend_dir, 'app/services/inventory_service.py')
+
+        with open(service_file, 'r') as f:
+            source = f.read()
+
+        tree = ast.parse(source)
+
+        # Find archive_product method
+        found_method = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == 'archive_product':
+                found_method = True
+                break
+
+        assert found_method, (
+            "Missing archive_product method in InventoryService.\n"
+            "This method is required to toggle product active/archived status."
+        )
+
+
+class TestDuplicateProductHandling:
+    """
+    CRITICAL: Test that duplicate product from catalog is handled gracefully.
+
+    When a user tries to add a product that already exists in their inventory,
+    the system should return a 409 Conflict with helpful information.
+
+    Bug History:
+    - 2026-01-26: Adding duplicate product from catalog showed generic error
+      instead of helpful "Product already exists" message with guidance.
+    """
+
+    @pytest.mark.regression
+    def test_from_catalog_endpoint_returns_409_with_product_info(self):
+        """
+        CRITICAL: Verify /products/from-catalog returns 409 with existing product info.
+
+        When a duplicate product is detected, the response should include:
+        - HTTP 409 status code
+        - existing_product_id field
+        - existing_product_name field
+        - helpful message for the user
+
+        This caught the unclear duplicate message bug on 2026-01-26.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Find the from-catalog endpoint
+        assert '/products/from-catalog' in source, (
+            "Missing POST /products/from-catalog endpoint"
+        )
+
+        # Check that JSONResponse is imported (needed for custom 409 response)
+        assert 'JSONResponse' in source, (
+            "JSONResponse must be imported to return custom 409 response.\n"
+            "Add: from fastapi.responses import JSONResponse"
+        )
+
+        # Check that 409 handling includes existing_product_id
+        assert 'existing_product_id' in source, (
+            "409 response must include existing_product_id field.\n"
+            "Frontend uses this to help user find the existing product."
+        )
+
+        # Check that helpful message is included
+        assert 'already exists' in source.lower() or 'already in your inventory' in source.lower(), (
+            "409 response must include helpful message about product existing.\n"
+            "This helps users understand they should update instead of add."
+        )
+
+    @pytest.mark.regression
+    def test_inventory_service_returns_existing_product_on_duplicate(self):
+        """
+        CRITICAL: Verify inventory service returns existing_product when duplicate detected.
+
+        The add_from_global_catalog method should return the existing product
+        information when a duplicate is detected, enabling the API to provide
+        helpful context in the 409 response.
+        """
+        import re
+
+        service_file = os.path.join(backend_dir, 'app/services/inventory_service.py')
+
+        with open(service_file, 'r') as f:
+            source = f.read()
+
+        # Check that the service returns existing_product in error case
+        assert 'existing_product' in source, (
+            "InventoryService must return 'existing_product' when duplicate detected.\n"
+            "This enables the API to include product info in 409 response."
+        )
+
+
+class TestPrintLabelFrontend:
+    """
+    CRITICAL: Test that Print Label functionality includes useful information.
+
+    The print label should include retail-relevant information, not just stock value.
+
+    Bug History:
+    - 2026-01-26: Print Label only showed Name, SKU, Price, Stock which is not
+      useful for retail labels. Fixed to include MRP, Brand, Category, HSN, etc.
+    """
+
+    @pytest.mark.regression
+    def test_print_label_includes_mrp_and_discount(self):
+        """
+        CRITICAL: Verify handlePrintLabel includes MRP and discount info.
+
+        Retail labels must show:
+        - MRP (Maximum Retail Price)
+        - Selling price (if different from MRP)
+        - Discount percentage (if applicable)
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'pages', 'InventoryManagement.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Find handlePrintLabel function
+            assert 'handlePrintLabel' in source, (
+                "handlePrintLabel function not found in InventoryManagement.tsx"
+            )
+
+            # Check for MRP in label
+            assert 'mrp' in source.lower() or 'MRP' in source, (
+                "Print label must include MRP (Maximum Retail Price).\n"
+                "Retail labels require MRP display for compliance."
+            )
+
+            # Check for store name
+            assert 'storeName' in source or 'store_name' in source or 'store-name' in source, (
+                "Print label should include store name for branding."
+            )
+
+    @pytest.mark.regression
+    def test_print_label_includes_hsn_code(self):
+        """
+        CRITICAL: Verify handlePrintLabel includes HSN code when available.
+
+        HSN code is important for GST compliance on retail labels.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'pages', 'InventoryManagement.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Check for HSN in label
+            assert 'hsn' in source.lower() or 'HSN' in source, (
+                "Print label should include HSN code for GST compliance.\n"
+                "HSN codes help with tax categorization."
+            )
+
+    @pytest.mark.regression
+    def test_product_interface_has_required_fields(self):
+        """
+        CRITICAL: Verify Product interface includes size and hsn_code fields.
+
+        These fields are needed for proper retail labels.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'pages', 'InventoryManagement.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Check Product interface has size field
+            assert 'size?' in source or 'size:' in source, (
+                "Product interface must have 'size' field for pack size info."
+            )
+
+            # Check Product interface has hsn_code field
+            assert 'hsn_code?' in source or 'hsn_code:' in source, (
+                "Product interface must have 'hsn_code' field for GST compliance."
+            )
+
+
+class TestBarcodeEndpointFix:
+    """
+    CRITICAL: Test that barcode lookup uses the correct API endpoint.
+
+    Bug fixed on 2026-01-27:
+    - Frontend was calling /api/v1/inventory/products/barcode/{barcode} (404)
+    - Correct endpoint is /api/v1/inventory/barcode/{barcode}
+    """
+
+    @pytest.mark.regression
+    def test_frontend_uses_correct_barcode_endpoint(self):
+        """
+        CRITICAL: Verify inventoryService uses /barcode/ not /products/barcode/.
+
+        Bug: Frontend called wrong endpoint causing "product not found" error
+        even when product exists in database.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'services', 'inventoryService.ts'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Should use /inventory/barcode/ NOT /inventory/products/barcode/
+            assert '/inventory/barcode/' in source, (
+                "inventoryService must use /inventory/barcode/ endpoint.\n"
+                "Bug: Using /inventory/products/barcode/ causes 404 errors."
+            )
+
+            # Should NOT use the wrong endpoint path
+            assert '/inventory/products/barcode/' not in source, (
+                "inventoryService must NOT use /inventory/products/barcode/ endpoint.\n"
+                "Correct path is /inventory/barcode/{barcode}"
+            )
+
+    @pytest.mark.regression
+    def test_numberpad_supports_keyboard_input(self):
+        """
+        CRITICAL: Verify NumberPad component supports keyboard input.
+
+        Bug: Users could only use on-screen buttons, not physical keyboard
+        or paste functionality for barcode entry.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'components', 'Inventory', 'NumberPad.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Should have TextField for keyboard input
+            assert 'TextField' in source, (
+                "NumberPad must include TextField for keyboard input support.\n"
+                "Users need to type barcodes using physical keyboard."
+            )
+
+            # Should have paste functionality
+            assert 'clipboard' in source.lower() or 'paste' in source.lower(), (
+                "NumberPad must support paste functionality.\n"
+                "Users need to paste copied barcodes."
+            )
+
+            # Should support Enter key submission
+            assert 'Enter' in source or 'onKeyDown' in source, (
+                "NumberPad must support Enter key for submission.\n"
+                "Users expect Enter to submit the barcode."
+            )
