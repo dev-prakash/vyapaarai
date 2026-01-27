@@ -43,13 +43,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Environment configuration
-ENVIRONMENT = 'prod'  # Change to 'dev' or 'staging' as needed
+ENVIRONMENT = 'prod'  # Used for some tables
 AWS_REGION = 'ap-south-1'
 
-# Table names
-STORES_TABLE = f'vyaparai-stores-{ENVIRONMENT}'
-PRODUCTS_TABLE = f'vyaparai-products-{ENVIRONMENT}'
-STATS_TABLE = f'vyaparai-store-stats-{ENVIRONMENT}'
+# Table names (explicit because Lambda uses 'production' but data tables use 'prod')
+STORES_TABLE = 'vyaparai-stores-prod'
+PRODUCTS_TABLE = 'vyaparai-store-inventory-prod'
+STATS_TABLE = 'vyaparai-store-stats-production'  # Matches Lambda ENVIRONMENT=production
 
 
 class StatsReconciler:
