@@ -1060,3 +1060,253 @@ class TestBarcodeScannerUISimplification:
                 "HybridBarcodeScanner must have fallback session mechanism.\n"
                 "Auto-fallback ensures scanner works even if auth fails."
             )
+
+
+class TestGlobalCatalogSearch:
+    """
+    CRITICAL: Test that global catalog search scans entire table when filtering.
+
+    Bug fixed on 2026-01-27:
+    - DynamoDB scan with Limit was applied BEFORE filtering
+    - If product not in first N items, search returned empty results
+    - Fixed to scan entire table when search term is provided
+    """
+
+    @pytest.mark.regression
+    def test_global_catalog_search_paginates_when_filtering(self):
+        """
+        CRITICAL: Verify global catalog search paginates through table when filtering.
+
+        Bug: Search for "Medimix" returned no results even though product exists
+        because DynamoDB Limit was applied before filtering.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Find the global-catalog endpoint
+        assert '/global-catalog' in source, (
+            "GET /global-catalog endpoint not found in inventory.py"
+        )
+
+        # Should check is_filtering to determine scan behavior
+        assert 'is_filtering' in source, (
+            "Global catalog search must check is_filtering flag.\n"
+            "When filtering (search/category), scan entire table.\n"
+            "When browsing, apply limit directly."
+        )
+
+        # Should NOT apply Limit when filtering
+        assert "if not is_filtering" in source, (
+            "Global catalog must only apply scan Limit when NOT filtering.\n"
+            "Bug: DynamoDB Limit applied before filter caused empty results."
+        )
+
+        # Should paginate using LastEvaluatedKey
+        assert 'LastEvaluatedKey' in source, (
+            "Global catalog must paginate using LastEvaluatedKey.\n"
+            "This ensures all items are scanned when filtering."
+        )
+
+        # Should search both name AND brand
+        assert 'brand_lower' in source or "brand'" in source.lower(), (
+            "Global catalog search must check both name AND brand fields.\n"
+            "Products may match on brand name (e.g., 'Medimix')."
+        )
+
+    @pytest.mark.regression
+    def test_global_catalog_applies_limit_after_filtering(self):
+        """
+        CRITICAL: Verify limit is applied AFTER filtering, not before.
+
+        The final result set should be limited to requested size,
+        but the scan should not be limited when searching.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Should have products[:limit] to apply limit after filtering
+        assert 'products[:limit]' in source or 'products[0:limit]' in source, (
+            "Global catalog must apply limit AFTER filtering.\n"
+            "Use: products = products[:limit]\n"
+            "Bug: Applying limit in scan causes missing results."
+        )
+
+
+class TestBulkUploadCSV:
+    """
+    CRITICAL: Test that CSV bulk upload endpoints exist and work correctly.
+
+    Feature added on 2026-01-27:
+    - POST /bulk-upload/csv - Upload and process CSV file
+    - GET /bulk-upload/status/{job_id} - Get job status
+    - DELETE /bulk-upload/cancel/{job_id} - Cancel job
+    """
+
+    @pytest.mark.regression
+    def test_bulk_upload_csv_endpoint_exists(self):
+        """
+        CRITICAL: Verify POST /bulk-upload/csv endpoint exists.
+
+        Frontend calls this endpoint to upload CSV files for bulk product import.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for POST /bulk-upload/csv endpoint
+        upload_pattern = r'@router\.post\s*\(\s*["\']\/bulk-upload\/csv["\']'
+        match = re.search(upload_pattern, source)
+
+        assert match is not None, (
+            "Missing POST /bulk-upload/csv endpoint in inventory.py.\n"
+            "Frontend requires this endpoint for CSV bulk product import.\n"
+            "Add @router.post('/bulk-upload/csv') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_bulk_upload_status_endpoint_exists(self):
+        """
+        CRITICAL: Verify GET /bulk-upload/status/{job_id} endpoint exists.
+
+        Frontend polls this endpoint to check bulk upload progress.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for GET /bulk-upload/status/{job_id} endpoint
+        status_pattern = r'@router\.get\s*\(\s*["\']\/bulk-upload\/status\/\{job_id\}["\']'
+        match = re.search(status_pattern, source)
+
+        assert match is not None, (
+            "Missing GET /bulk-upload/status/{job_id} endpoint in inventory.py.\n"
+            "Frontend requires this endpoint to poll bulk upload progress.\n"
+            "Add @router.get('/bulk-upload/status/{job_id}') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_bulk_upload_cancel_endpoint_exists(self):
+        """
+        CRITICAL: Verify DELETE /bulk-upload/cancel/{job_id} endpoint exists.
+
+        Frontend calls this endpoint to cancel a running bulk upload job.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Check for DELETE /bulk-upload/cancel/{job_id} endpoint
+        cancel_pattern = r'@router\.delete\s*\(\s*["\']\/bulk-upload\/cancel\/\{job_id\}["\']'
+        match = re.search(cancel_pattern, source)
+
+        assert match is not None, (
+            "Missing DELETE /bulk-upload/cancel/{job_id} endpoint in inventory.py.\n"
+            "Frontend requires this endpoint to cancel bulk upload jobs.\n"
+            "Add @router.delete('/bulk-upload/cancel/{job_id}') endpoint."
+        )
+
+    @pytest.mark.regression
+    def test_bulk_upload_validates_required_fields(self):
+        """
+        CRITICAL: Verify bulk upload validates required CSV fields.
+
+        Required fields: product_name, selling_price, current_stock
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Should check for required fields
+        required_fields = ['product_name', 'selling_price', 'current_stock']
+        for field in required_fields:
+            assert field in source, (
+                f"Bulk upload must validate required field: {field}\n"
+                "CSV files must have these columns for product import."
+            )
+
+    @pytest.mark.regression
+    def test_bulk_upload_handles_file_upload(self):
+        """
+        CRITICAL: Verify bulk upload uses UploadFile from FastAPI.
+
+        File upload requires proper multipart form handling.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Should import UploadFile and File from fastapi
+        assert 'UploadFile' in source, (
+            "Bulk upload must use UploadFile from FastAPI.\n"
+            "Add: from fastapi import UploadFile, File"
+        )
+
+        assert 'File' in source, (
+            "Bulk upload must use File(...) for form data.\n"
+            "Add: from fastapi import UploadFile, File"
+        )
+
+    @pytest.mark.regression
+    def test_bulk_upload_returns_job_id(self):
+        """
+        CRITICAL: Verify bulk upload returns a job ID for tracking.
+
+        Frontend uses job ID to poll for progress and results.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Should return jobId in response
+        assert 'jobId' in source or 'job_id' in source, (
+            "Bulk upload must return jobId in response.\n"
+            "Frontend uses this to poll /bulk-upload/status/{jobId}"
+        )
+
+    @pytest.mark.regression
+    def test_bulk_upload_tracks_progress(self):
+        """
+        CRITICAL: Verify bulk upload tracks progress (total, processed, successful, failed).
+
+        Frontend displays progress bar based on these values.
+        """
+        import re
+
+        inventory_file = os.path.join(backend_dir, 'app/api/v1/inventory.py')
+
+        with open(inventory_file, 'r') as f:
+            source = f.read()
+
+        # Should track progress metrics
+        progress_fields = ['total', 'processed', 'successful', 'failed']
+        for field in progress_fields:
+            assert f"'{field}'" in source or f'"{field}"' in source, (
+                f"Bulk upload must track progress field: {field}\n"
+                "Frontend displays these values in progress UI."
+            )
