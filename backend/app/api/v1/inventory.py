@@ -1227,59 +1227,103 @@ async def browse_global_catalog(
     Requires store owner authentication.
     """
     try:
+        # When searching/filtering, we need to scan more items since DynamoDB
+        # applies Limit BEFORE filtering. For searches, scan full table and filter.
+        # For browsing without search, apply limit directly.
+        is_filtering = bool(search or category)
+
         scan_kwargs = {
             'TableName': GLOBAL_PRODUCTS_TABLE,
-            'Limit': min(limit, 1000)  # Cap at 1000 for performance
         }
 
-        # Execute scan
-        response = dynamodb_client.scan(**scan_kwargs)
+        # Only apply scan limit when not filtering
+        if not is_filtering:
+            scan_kwargs['Limit'] = min(limit, 1000)
 
         # Parse products
         products = []
-        for item in response.get('Items', []):
-            product = parse_dynamodb_item(item)
+        last_evaluated_key = None
 
-            # Apply filters (post-scan filtering)
-            if category and product.get('category', '').lower() != category.lower():
-                continue
-            if search and search.lower() not in product.get('name', '').lower():
-                continue
+        # For filtering, we may need to paginate through the table
+        while True:
+            if last_evaluated_key:
+                scan_kwargs['ExclusiveStartKey'] = last_evaluated_key
 
-            # Format product for frontend
-            formatted_product = {
-                'product_id': product.get('product_id'),
-                'name': product.get('name'),
-                'brand': product.get('brand'),
-                'category': product.get('category'),
-                'barcode': product.get('barcode'),
-                'description': product.get('description'),
-                'quality_score': product.get('quality_score'),
-                'attributes': product.get('attributes', {}),
-            }
+            # Execute scan
+            response = dynamodb_client.scan(**scan_kwargs)
 
-            # Get MRP from attributes or top-level
-            mrp = product.get('mrp')
-            if not mrp and product.get('attributes'):
-                mrp = product.get('attributes', {}).get('mrp')
-            formatted_product['mrp'] = mrp
+            for item in response.get('Items', []):
+                product = parse_dynamodb_item(item)
 
-            # Get image from canonical_image_urls or image field
-            image_urls = product.get('canonical_image_urls', {})
-            if isinstance(image_urls, dict):
-                formatted_product['image'] = image_urls.get('medium') or image_urls.get('original') or image_urls.get('thumbnail')
-            else:
-                formatted_product['image'] = product.get('image')
+                # Apply filters (post-scan filtering)
+                if category and product.get('category', '').lower() != category.lower():
+                    continue
 
-            products.append(formatted_product)
+                # Enhanced search: check product name AND brand
+                if search:
+                    search_lower = search.lower()
+                    name_lower = product.get('name', '').lower()
+                    brand_lower = product.get('brand', '').lower()
 
-        logger.info(f"Global catalog browse: returning {len(products)} products")
+                    # Check if search term is in name or brand
+                    if search_lower not in name_lower and search_lower not in brand_lower:
+                        continue
+
+                # Format product for frontend
+                formatted_product = {
+                    'product_id': product.get('product_id'),
+                    'name': product.get('name'),
+                    'brand': product.get('brand'),
+                    'category': product.get('category'),
+                    'barcode': product.get('barcode'),
+                    'description': product.get('description'),
+                    'quality_score': product.get('quality_score'),
+                    'attributes': product.get('attributes', {}),
+                }
+
+                # Get MRP from attributes or top-level
+                mrp = product.get('mrp')
+                if not mrp and product.get('attributes'):
+                    mrp = product.get('attributes', {}).get('mrp')
+                formatted_product['mrp'] = mrp
+
+                # Get image from canonical_image_urls or image field
+                image_urls = product.get('canonical_image_urls', {})
+                if isinstance(image_urls, dict):
+                    formatted_product['image'] = image_urls.get('medium') or image_urls.get('original') or image_urls.get('thumbnail')
+                else:
+                    formatted_product['image'] = product.get('image')
+
+                products.append(formatted_product)
+
+                # Stop if we have enough products for non-filtering case
+                if not is_filtering and len(products) >= limit:
+                    break
+
+            # Check if we should continue scanning
+            last_evaluated_key = response.get('LastEvaluatedKey')
+
+            # Stop conditions:
+            # 1. No more items to scan
+            # 2. Not filtering and we have enough items
+            # 3. Filtering and we have enough items (limit the result set)
+            if not last_evaluated_key:
+                break
+            if not is_filtering and len(products) >= limit:
+                break
+            if is_filtering and len(products) >= limit:
+                break
+
+        # Apply final limit
+        products = products[:limit]
+
+        logger.info(f"Global catalog browse: returning {len(products)} products (search={search})")
 
         return {
             'success': True,
             'products': products,
             'count': len(products),
-            'has_more': 'LastEvaluatedKey' in response
+            'has_more': last_evaluated_key is not None or len(products) == limit
         }
 
     except Exception as e:
