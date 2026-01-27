@@ -961,3 +961,102 @@ class TestBarcodeEndpointFix:
                 "NumberPad must support Enter key for submission.\n"
                 "Users expect Enter to submit the barcode."
             )
+
+
+class TestBarcodeScannerUISimplification:
+    """
+    CRITICAL: Test that barcode scanner UI is simplified and user-friendly.
+
+    Changes made on 2026-01-27:
+    - Removed confusing "No Auth Required" button
+    - Added USB barcode scanner tip for faster workflow
+    - Mobile scanner now auto-falls back if auth fails
+    """
+
+    @pytest.mark.regression
+    def test_no_auth_required_button_removed(self):
+        """
+        CRITICAL: Verify "No Auth Required" button is removed from UI.
+
+        This button was confusing - the main mobile scanner button now
+        automatically falls back to no-auth method if needed.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'components',
+            'Inventory', 'HybridBarcodeScanner.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Should NOT have "No Auth Required" button text
+            assert 'No Auth Required' not in source, (
+                "HybridBarcodeScanner should NOT have 'No Auth Required' button.\n"
+                "This was removed to simplify the UI - main button auto-falls back."
+            )
+
+    @pytest.mark.regression
+    def test_usb_scanner_tip_present(self):
+        """
+        CRITICAL: Verify USB barcode scanner tip is shown to users.
+
+        USB scanners are much faster than mobile camera scanning.
+        Users should be informed about this option.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'components',
+            'Inventory', 'HybridBarcodeScanner.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Should have USB scanner tip
+            assert 'USB' in source and 'scanner' in source.lower(), (
+                "HybridBarcodeScanner should include USB scanner tip.\n"
+                "USB scanners are faster than mobile camera scanning."
+            )
+
+            # Should mention it's a Pro Tip
+            assert 'Pro Tip' in source or 'Tip' in source, (
+                "USB scanner suggestion should be presented as a tip.\n"
+                "This helps users discover faster scanning options."
+            )
+
+    @pytest.mark.regression
+    def test_mobile_scanner_checks_localstorage(self):
+        """
+        CRITICAL: Verify mobile scanner checks localStorage for store owner auth.
+
+        Store owners login via a flow that sets vyaparai_current_store in
+        localStorage but may not update useAuthStore. Mobile scanner must
+        check both sources.
+        """
+        import os
+
+        frontend_file = os.path.join(
+            backend_dir, '..', 'frontend-pwa', 'src', 'components',
+            'Inventory', 'HybridBarcodeScanner.tsx'
+        )
+
+        if os.path.exists(frontend_file):
+            with open(frontend_file, 'r') as f:
+                source = f.read()
+
+            # Should check localStorage for store data
+            assert 'vyaparai_current_store' in source, (
+                "HybridBarcodeScanner must check localStorage for store data.\n"
+                "Store owner login sets vyaparai_current_store, not useAuthStore."
+            )
+
+            # Should have fallback mechanism
+            assert 'createFallbackMobileSession' in source, (
+                "HybridBarcodeScanner must have fallback session mechanism.\n"
+                "Auto-fallback ensures scanner works even if auth fails."
+            )
