@@ -1310,3 +1310,113 @@ class TestBulkUploadCSV:
                 f"Bulk upload must track progress field: {field}\n"
                 "Frontend displays these values in progress UI."
             )
+
+
+class TestEmailAuthentication:
+    """
+    CRITICAL: Test email authentication and branding.
+
+    Bug fix: Email template branding, copyright, and error messages.
+    Author: DevPrakash
+    """
+
+    @pytest.mark.regression
+    def test_email_template_uses_correct_branding(self):
+        """
+        REGRESSION: Email template must use 'VyapaarAI' (double 'a') not 'VyaparAI'.
+
+        Original bug: Email subject and body used 'VyaparAI' (single 'a')
+        Fix: Updated all occurrences to 'VyapaarAI'
+        """
+        email_service_file = os.path.join(backend_dir, 'app/services/email_service.py')
+
+        with open(email_service_file, 'r') as f:
+            source = f.read()
+
+        # Should NOT contain single 'a' branding (except in email domains)
+        # Count occurrences of wrong branding in non-domain contexts
+        import re
+        wrong_branding = re.findall(r'VyaparAI(?!\.com)', source)
+        assert len(wrong_branding) == 0, (
+            f"Email template uses wrong branding 'VyaparAI' (single 'a').\n"
+            f"Found {len(wrong_branding)} occurrences. Use 'VyapaarAI' (double 'a')."
+        )
+
+        # Should contain correct branding
+        assert 'VyapaarAI' in source, (
+            "Email template must use correct branding 'VyapaarAI' (double 'a')."
+        )
+
+    @pytest.mark.regression
+    def test_email_template_has_current_copyright_year(self):
+        """
+        REGRESSION: Email template must have current copyright year (2026).
+
+        Original bug: Copyright year was 2024
+        Fix: Updated to 2026
+        """
+        email_service_file = os.path.join(backend_dir, 'app/services/email_service.py')
+
+        with open(email_service_file, 'r') as f:
+            source = f.read()
+
+        # Should contain 2026 copyright
+        assert '© 2026' in source or '2026' in source, (
+            "Email template must have current copyright year (2026).\n"
+            "Update: © 2024 → © 2026"
+        )
+
+        # Should NOT contain old copyright years
+        assert '© 2024' not in source, (
+            "Email template has outdated copyright year 2024.\n"
+            "Update to: © 2026 VyapaarAI. All rights reserved."
+        )
+
+    @pytest.mark.regression
+    def test_passcode_error_message_is_user_friendly(self):
+        """
+        REGRESSION: Invalid passcode error must be user-friendly.
+
+        Original bug: Error message was not helpful
+        Fix: Changed to "Invalid passcode entered. Please try again."
+        """
+        auth_file = os.path.join(backend_dir, 'app/api/v1/auth.py')
+
+        with open(auth_file, 'r') as f:
+            source = f.read()
+
+        # Should have user-friendly error message
+        assert 'Invalid passcode entered' in source or 'try again' in source.lower(), (
+            "Passcode error message must be user-friendly.\n"
+            "Use: 'Invalid passcode entered. Please try again.'"
+        )
+
+    @pytest.mark.regression
+    def test_email_verification_uses_database_not_whitelist(self):
+        """
+        REGRESSION: Email verification must check database, not hardcoded whitelist.
+
+        Original bug: Only whitelisted emails could login via passcode
+        Fix: Check stores DynamoDB table for registered store owners
+        """
+        auth_file = os.path.join(backend_dir, 'app/api/v1/auth.py')
+
+        with open(auth_file, 'r') as f:
+            source = f.read()
+
+        # Should have check_email_registered function that queries database
+        assert 'check_email_registered' in source, (
+            "Auth must have check_email_registered function."
+        )
+
+        # Should check stores_table in the function
+        assert 'stores_table.scan' in source or 'stores_table' in source, (
+            "Email verification must check stores database table.\n"
+            "Cannot rely on hardcoded whitelist for store owners."
+        )
+
+        # Should NOT have STORE_OWNER_EMAILS whitelist
+        assert 'STORE_OWNER_EMAILS' not in source, (
+            "Remove hardcoded STORE_OWNER_EMAILS whitelist.\n"
+            "Email verification should only use database lookup."
+        )

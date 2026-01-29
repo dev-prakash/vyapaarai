@@ -1,5 +1,5 @@
 """
-Email Service for VyaparAI
+Email Service for VyapaarAI
 Handles sending emails via AWS SES or SMTP
 """
 
@@ -18,7 +18,7 @@ class EmailService:
         """Initialize email service with AWS SES or fallback to SMTP"""
         self.use_ses = os.getenv("USE_AWS_SES", "false").lower() == "true"
         self.from_email = os.getenv("FROM_EMAIL", "noreply@vyaparai.com")
-        self.from_name = "VyaparAI"
+        self.from_name = "VyapaarAI"
         
         if self.use_ses:
             # Initialize AWS SES client
