@@ -20,25 +20,25 @@ cp -r app/* lambda_deploy/app/
 cp lambda_handler.py lambda_deploy/
 cp requirements.txt lambda_deploy/
 
-# Install dependencies for Linux ARM64 (Lambda runtime)
-echo "📥 Installing dependencies for Linux ARM64..."
+# Install dependencies for Linux x86_64 (Lambda runtime)
+echo "📥 Installing dependencies for Linux x86_64..."
 cd lambda_deploy
 
-# Install dependencies with ARM64 Linux platform (Lambda uses arm64)
+# Install dependencies with x86_64 Linux platform (Lambda uses x86_64)
 # Use Docker to build for the correct platform
 if command -v docker &> /dev/null; then
-    echo "🐳 Using Docker to build ARM64 dependencies..."
+    echo "🐳 Using Docker to build x86_64 dependencies..."
     cd ..
     docker run --rm -v "$(pwd)/lambda_deploy:/var/task" \
-        --platform linux/arm64 \
+        --platform linux/amd64 \
         public.ecr.aws/sam/build-python3.11:latest \
         pip install -r /var/task/requirements.txt -t /var/task --quiet
     cd lambda_deploy
 else
     echo "⚠️  Docker not available, using pip with platform flags..."
-    # First try to install platform-specific binaries for ARM64
+    # First try to install platform-specific binaries for x86_64
     pip install -r requirements.txt -t . --upgrade --quiet \
-      --platform manylinux2014_aarch64 \
+      --platform manylinux2014_x86_64 \
       --implementation cp \
       --python-version 3.11 \
       --only-binary=:all: \

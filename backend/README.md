@@ -393,6 +393,33 @@ export ENVIRONMENT=production
 gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 ```
 
+### AWS Lambda Deployment
+
+**Quick Deploy (Production)**:
+```bash
+# Basic deployment
+./scripts/deploy_lambda.sh
+
+# Deploy with full regression testing
+./scripts/deploy_with_tests.sh
+
+# Deploy with authenticated API tests
+VYAPARAI_TEST_PASSWORD=xxx ./scripts/deploy_with_tests.sh
+```
+
+**Deploy with Testing Script** (`deploy_with_tests.sh`):
+- **Pre-deployment**: Static syntax validation and import tests
+- **Deployment**: Builds and deploys Lambda package with dependencies
+- **Post-deployment**: Live API testing against deployed endpoints
+- **Automatic Rollback**: Reverts deployment if regression tests fail
+
+**Features**:
+- ✅ Regression test validation before deployment
+- ✅ Automatic rollback on test failures
+- ✅ Live API endpoint testing post-deployment
+- ✅ Comprehensive logging and error reporting
+- ✅ Support for authenticated endpoint testing
+
 ### Docker
 
 ```dockerfile
