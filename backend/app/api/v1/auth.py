@@ -65,14 +65,39 @@ OTP_MAX_ATTEMPTS = 3
 OTP_LENGTH = 6
 OTP_EXPIRY_SECONDS = OTP_EXPIRY_MINUTES * 60
 
-# Store owner email whitelist (use database in production)
-STORE_OWNER_EMAILS = [
-    "owner@vyaparai.com",
-    "admin@vyaparai.com",
-    "test@vyaparai.com",
-    "prakashsukumar@gmail.com",
-    "devprakashsen@gmail.com"
-]
+async def check_email_registered(email: str) -> dict:
+    """
+    Check if an email is registered as a store owner in the database.
+    Only registered store owners can use email-based login.
+    """
+    email_lower = email.lower()
+
+    if not stores_table:
+        logger.error("Stores table not available")
+        return {'found': False, 'error': 'Database not available'}
+
+    try:
+        # Scan for email in both top-level and nested contact_info
+        response = stores_table.scan(
+            FilterExpression='email = :email OR #ci.#em = :email',
+            ExpressionAttributeNames={'#ci': 'contact_info', '#em': 'email'},
+            ExpressionAttributeValues={':email': email_lower}
+        )
+        if response.get('Items') and len(response['Items']) > 0:
+            store = response['Items'][0]
+            logger.info(f"Found store by email in database: {store.get('store_id')}")
+            return {
+                'found': True,
+                'store_id': store.get('store_id'),
+                'store_name': store.get('name'),
+                'owner_name': store.get('owner_name'),
+                'source': 'database'
+            }
+    except Exception as e:
+        logger.error(f"Error scanning stores table for email: {e}")
+        return {'found': False, 'error': str(e)}
+
+    return {'found': False}
 
 
 def generate_secure_otp(length: int = OTP_LENGTH) -> str:
@@ -669,15 +694,18 @@ async def send_email_passcode(request: EmailPasscodeRequest):
     - Single-use only
     """
     logger.info(f"Email passcode request for: {request.email}")
-    
+
     try:
-        # Check if email is registered (whitelist for now)
-        if request.email.lower() not in [e.lower() for e in STORE_OWNER_EMAILS]:
+        # Check if email is registered in stores database or whitelist
+        email_check = await check_email_registered(request.email)
+        if not email_check.get('found'):
             logger.warning(f"Unregistered email attempt: {request.email}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Email not registered. Please contact support to register your store."
+                detail="Email not registered. Please check your email address or register a new store."
             )
+
+        logger.info(f"Email verified - source: {email_check.get('source')}, store_id: {email_check.get('store_id')}")
         
         # Generate random 6-digit passcode
         passcode = str(random.randint(100000, 999999))
@@ -772,7 +800,7 @@ async def verify_email_passcode(request: VerifyEmailPasscodeRequest):
             remaining = 3 - passcode_data["attempts"]
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid passcode. {remaining} attempt(s) remaining."
+                detail=f"Invalid passcode entered. Please try again. {remaining} attempt(s) remaining."
             )
         
         # Mark passcode as used

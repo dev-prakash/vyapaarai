@@ -1,5 +1,5 @@
 """
-Email Service for VyaparAI
+Email Service for VyapaarAI
 Handles sending emails via AWS SES or SMTP
 """
 
@@ -18,7 +18,7 @@ class EmailService:
         """Initialize email service with AWS SES or fallback to SMTP"""
         self.use_ses = os.getenv("USE_AWS_SES", "false").lower() == "true"
         self.from_email = os.getenv("FROM_EMAIL", "noreply@vyaparai.com")
-        self.from_name = "VyaparAI"
+        self.from_name = "VyapaarAI"
         
         if self.use_ses:
             # Initialize AWS SES client
@@ -41,7 +41,7 @@ class EmailService:
         Returns:
             True if email sent successfully, False otherwise
         """
-        subject = "Your VyaparAI Login Passcode"
+        subject = "Your VyapaarAI Login Passcode"
         
         # HTML email body
         html_body = f"""
@@ -62,12 +62,12 @@ class EmailService:
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>VyaparAI</h1>
+                    <h1>VyapaarAI</h1>
                     <p>Your Smart Store Assistant</p>
                 </div>
                 <div class="content">
                     <h2>Login Passcode</h2>
-                    <p>You requested a login passcode for your VyaparAI store account.</p>
+                    <p>You requested a login passcode for your VyapaarAI store account.</p>
                     
                     <div class="passcode-box">
                         <p>Your 6-digit passcode is:</p>
@@ -79,13 +79,13 @@ class EmailService:
                     <div class="warning">
                         <strong>⚠️ Security Notice:</strong><br>
                         • Never share this passcode with anyone<br>
-                        • VyaparAI staff will never ask for your passcode<br>
+                        • VyapaarAI staff will never ask for your passcode<br>
                         • If you didn't request this, please ignore this email
                     </div>
                     
                     <div class="footer">
-                        <p>This is an automated message from VyaparAI. Please do not reply to this email.</p>
-                        <p>© 2024 VyaparAI. All rights reserved.</p>
+                        <p>This is an automated message from VyapaarAI. Please do not reply to this email.</p>
+                        <p>© 2026 VyapaarAI. All rights reserved.</p>
                     </div>
                 </div>
             </div>
@@ -95,9 +95,9 @@ class EmailService:
         
         # Plain text email body (fallback)
         text_body = f"""
-        VyaparAI Login Passcode
-        
-        You requested a login passcode for your VyaparAI store account.
+        VyapaarAI Login Passcode
+
+        You requested a login passcode for your VyapaarAI store account.
         
         Your 6-digit passcode is: {passcode}
         
@@ -105,11 +105,11 @@ class EmailService:
         
         Security Notice:
         - Never share this passcode with anyone
-        - VyaparAI staff will never ask for your passcode
+        - VyapaarAI staff will never ask for your passcode
         - If you didn't request this, please ignore this email
         
-        This is an automated message from VyaparAI.
-        © 2024 VyaparAI. All rights reserved.
+        This is an automated message from VyapaarAI.
+        © 2026 VyapaarAI. All rights reserved.
         """
         
         return await self.send_email(to_email, subject, text_body, html_body)
