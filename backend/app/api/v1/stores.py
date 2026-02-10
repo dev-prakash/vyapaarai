@@ -26,6 +26,7 @@ from app.core.security import get_current_store_owner
 from app.core.database import get_dynamodb, STORES_TABLE, SESSIONS_TABLE
 from app.services.store_search_service import store_search_service
 from app.services.geocoding_service import geocoding_service
+from app.services.inventory_service import inventory_service
 
 router = APIRouter(prefix="/stores", tags=["stores"])
 
@@ -792,6 +793,22 @@ async def get_store_details(store_id: str):
 
         print(f"[get_store_details] All fields parsed, building response...")
 
+        # Fetch real products from inventory table
+        store_products = []
+        total_products = 0
+        try:
+            inventory_result = await inventory_service.get_products(
+                store_id=store_id,
+                page=1,
+                limit=100
+            )
+            store_products = inventory_result.get("products", [])
+            total_products = inventory_result.get("total", len(store_products))
+            print(f"[get_store_details] Fetched {total_products} products for store {store_id}")
+        except Exception as inv_err:
+            print(f"[get_store_details] Warning: Failed to fetch products: {inv_err}")
+            # Non-fatal: continue with empty products rather than failing the whole response
+
         # Build response with comprehensive error handling
         try:
             store_response = {
@@ -819,10 +836,9 @@ async def get_store_details(store_id: str):
                     "rating_count": 0,
                     "openingHours": f"{settings_obj.get('business_hours', {}).get('open', '09:00')} - {settings_obj.get('business_hours', {}).get('close', '21:00')}",
                     "status": item.get('status', 'active'),
-                    # Include empty products and reviews arrays for frontend compatibility
-                    "products": [],
+                    "products": store_products,
                     "reviews": [],
-                    "total_products": 0,
+                    "total_products": total_products,
                     "description": store_profile.get('description', 'Your neighborhood store'),
                     "tagline": store_profile.get('tagline', ''),
                 }
