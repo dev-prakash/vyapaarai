@@ -1,4 +1,4 @@
-# VyaparAI Monorepo
+# VyapaarAI Monorepo
 
 A comprehensive AI-powered inventory and order management platform designed for Indian retail stores (kirana shops). Features intelligent product catalog management, real-time inventory tracking, multi-language support, and enterprise-grade order processing with transactional safety.
 

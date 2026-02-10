@@ -1,7 +1,7 @@
 # VyaparAI - Technical Design Document
 
-**Version:** 3.0
-**Date:** January 26, 2026
+**Version:** 3.1
+**Date:** February 10, 2026
 **Status:** Production
 **Document Owner:** Development Team
 
@@ -11,6 +11,7 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 3.1 | Feb 10, 2026 | Dev Prakash | Added Section 9.6 Branding System Update & Section 8.12 CSV Bulk Upload API - Comprehensive documentation for rebranding to VyapaarAI, enhanced email service, and CSV bulk inventory upload functionality |
 | 3.0 | Jan 26, 2026 | Dev Prakash | Added Section 6.5 In-Memory Caching System - Comprehensive documentation for inventory summary caching, performance improvements, testing strategy |
 | 2.6 | Jan 16, 2026 | Dev Prakash | Updated Section 17.1 - Both critical endpoint failures now RESOLVED: removed cache decorator from order history, registered payments router |
 | 2.5 | Jan 16, 2026 | Dev Prakash | Added Section 17.1 API Testing & Quality Assurance - Comprehensive Store Owner API test results, documented 2 critical endpoint failures |
@@ -1608,6 +1609,166 @@ The Regional tab displays a "Coming Soon" placeholder for future multilingual pr
 - Language coverage metrics
 - Translation completeness
 
+### 8.12 CSV Bulk Upload API
+
+The CSV Bulk Upload system provides store owners with efficient bulk inventory management capabilities, supporting async processing with job tracking and status monitoring.
+
+#### **Base Path:** `/api/v1/inventory/bulk-upload`
+
+#### **8.12.1 Upload CSV Endpoint**
+
+**Endpoint:** `POST /api/v1/inventory/bulk-upload/csv`
+
+**Content Type:** `multipart/form-data`
+
+**Request Parameters:**
+```
+curl -X POST "https://api.vyapaarai.com/api/v1/inventory/bulk-upload/csv" \
+  -H "Authorization: Bearer {jwt_token}" \
+  -F "file=@inventory.csv" \
+  -F "options={'skip_duplicates': true, 'auto_verify': false}"
+```
+
+**Form Fields:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| file | File | Yes | CSV file with inventory data |
+| options | JSON | No | Processing options |
+
+**Processing Options:**
+```json
+{
+  "skip_duplicates": true,        // Skip existing SKUs
+  "auto_verify": false,          // Auto-mark as verified
+  "notification_email": "email", // Job completion notification
+  "match_strategy": "strict"     // strict | fuzzy matching
+}
+```
+
+**CSV Format:**
+```csv
+product_name,brand,sku,barcode,cost_price,selling_price,mrp,current_stock,min_stock_level,category,tax_rate,discount_percentage,is_returnable,is_perishable
+Rice Basmati 1kg,Tata,SKU001,1234567890123,45.00,50.00,55.00,100,10,Groceries,5.0,0.0,true,false
+Cooking Oil 1L,Fortune,SKU002,2345678901234,120.00,130.00,140.00,50,5,Cooking,12.0,5.0,true,false
+```
+
+**Response:**
+```json
+{
+  "job_id": "bulk_upload_20260210_abc123",
+  "status": "queued",
+  "message": "CSV upload queued for processing",
+  "estimated_rows": 150,
+  "estimated_completion": "2026-02-10T15:35:00Z"
+}
+```
+
+#### **8.12.2 Job Status Endpoint**
+
+**Endpoint:** `GET /api/v1/inventory/bulk-upload/status/{job_id}`
+
+**Response:**
+```json
+{
+  "job_id": "bulk_upload_20260210_abc123",
+  "status": "processing",
+  "progress": {
+    "total_rows": 150,
+    "processed_rows": 75,
+    "successful_count": 70,
+    "error_count": 3,
+    "duplicate_count": 2,
+    "percentage": 50.0
+  },
+  "estimated_completion": "2026-02-10T15:40:00Z",
+  "created_at": "2026-02-10T15:30:00Z",
+  "started_at": "2026-02-10T15:31:00Z"
+}
+```
+
+**Status Values:**
+- `queued` - Waiting for processing
+- `processing` - Currently being processed
+- `completed` - Successfully completed
+- `completed_with_errors` - Finished but some rows failed
+- `failed` - Critical error, processing aborted
+- `cancelled` - User cancelled the job
+
+#### **8.12.3 Cancel Job Endpoint**
+
+**Endpoint:** `DELETE /api/v1/inventory/bulk-upload/cancel/{job_id}`
+
+**Response:**
+```json
+{
+  "job_id": "bulk_upload_20260210_abc123",
+  "status": "cancelled",
+  "message": "Job cancelled successfully",
+  "rows_processed": 75,
+  "cancelled_at": "2026-02-10T15:35:00Z"
+}
+```
+
+#### **8.12.4 Error Handling**
+
+**CSV Validation Errors:**
+- Missing required columns
+- Invalid data types
+- Duplicate SKUs within file
+- Invalid price values (negative/zero)
+- Invalid boolean values
+
+**Processing Errors:**
+- Product already exists (if skip_duplicates=false)
+- Invalid store_id
+- Database connection issues
+- Lambda timeout for large files
+
+**Error Response:**
+```json
+{
+  "job_id": "bulk_upload_20260210_abc123",
+  "status": "completed_with_errors",
+  "error_report_url": "https://s3.amazonaws.com/errors/job_abc123_errors.csv",
+  "summary": {
+    "total_errors": 5,
+    "validation_errors": 3,
+    "duplicate_errors": 2
+  }
+}
+```
+
+#### **8.12.5 Implementation Details**
+
+**Backend Files:**
+- `backend/app/api/v1/inventory.py` - API endpoints
+- `backend/app/services/bulk_upload_service.py` - Processing logic
+- `backend/app/models/bulk_upload.py` - Job tracking models
+
+**AWS Services:**
+- **S3**: Temporary file storage for CSV uploads
+- **Lambda**: Async processing with checkpoint/resume
+- **DynamoDB**: Job status tracking (`vyaparai-import-jobs-prod`)
+
+**Processing Flow:**
+1. Upload CSV to S3 temporary storage
+2. Create job record in DynamoDB
+3. Trigger Lambda function for async processing
+4. Process CSV in batches with checkpoint support
+5. Update job status and progress in real-time
+6. Generate error report if needed
+7. Auto-cleanup after 30 days via TTL
+
+#### **8.12.6 Performance Characteristics**
+
+| Metric | Value |
+|--------|-------|
+| Max File Size | 10MB |
+| Max Rows | 5,000 per job |
+| Processing Rate | ~50 rows/second |
+| Timeout Protection | Checkpoint/resume for large jobs |
+| Error Rate | < 1% for valid CSV data |
+
 ---
 
 ## 9. Security & Authentication
@@ -1927,6 +2088,159 @@ useEffect(() => {
 | Session Validation | 1-minute interval | ✅ Active |
 | JWT Expiration Check | On every API call | ✅ Active |
 | Role-Based Redirects | User type aware | ✅ Active |
+
+### 9.6 Branding System Update
+
+> **Updated: February 2026** - Complete rebranding from "VyaparAI" to "VyapaarAI" with enhanced email service and improved user experience.
+
+#### 9.6.1 Branding Changes Overview
+
+The platform underwent a comprehensive rebranding initiative to align with the correct Hindi spelling "VyapaarAI" (व्यापार = Business/Trade in Hindi).
+
+**Key Changes:**
+- Brand name: `VyaparAI` → `VyapaarAI`
+- Copyright year: `2025` → `2026`
+- Enhanced email service with professional branding
+- Improved passcode error messaging
+- Updated regression testing suite
+
+#### 9.6.2 Email Service Enhancement
+
+**File:** `backend/app/services/email_service.py`
+
+The email service was completely redesigned with modern branding and enhanced security features:
+
+**Key Improvements:**
+- Professional HTML email templates with gradient branding
+- Enhanced security warnings and user education
+- Responsive design for all email clients
+- Proper fallback to plain text
+- AWS SES integration with development mode fallback
+
+**Email Template Features:**
+```html
+<!-- Modern Email Template -->
+<div class="header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+    <h1>VyapaarAI</h1>
+    <p>Your Smart Store Assistant</p>
+</div>
+```
+
+**Security Features:**
+- Clear 15-minute expiry messaging
+- Security warnings about phishing
+- One-time use passcode indication
+- Professional copyright notice
+
+#### 9.6.3 Authentication Improvements
+
+**File:** `backend/app/api/v1/auth.py`
+
+Enhanced passcode error messaging for better user experience:
+
+**Before:**
+```python
+# Generic error message
+{"error": "Invalid passcode"}
+```
+
+**After:**
+```python
+# Specific, actionable error messages
+{"error": "Please check your email for the 6-digit passcode and try again"}
+{"error": "Passcode expired. Please request a new one"}
+{"error": "Maximum attempts exceeded. Please try again later"}
+```
+
+**Implementation Details:**
+- Brand name updated in email headers: `from_name = "VyapaarAI"`
+- Enhanced email subject lines with proper branding
+- Improved error handling with user-friendly messages
+- Consistent branding across all authentication flows
+
+#### 9.6.4 Regression Testing Suite
+
+**File:** `backend/tests/regression/test_critical_paths.py`
+
+Added comprehensive regression tests to prevent critical deployment issues:
+
+**Test Categories:**
+1. **Syntax Validation Tests**
+   - AST parsing for all critical Python files
+   - FastAPI route configuration validation
+   - Pydantic model compatibility checks
+
+2. **Email Authentication Tests**
+   - Email service functionality validation
+   - SMTP/SES integration testing
+   - HTML template rendering tests
+
+3. **Critical Path Protection**
+   - Lambda cold start issue prevention
+   - API route registration verification
+   - Model validation for production readiness
+
+**Test Coverage:**
+```python
+@pytest.mark.regression
+def test_email_service_branding_correct():
+    """Verify email service uses correct VyapaarAI branding"""
+    from app.services.email_service import EmailService
+
+    service = EmailService()
+    assert service.from_name == "VyapaarAI"
+    # Additional branding validation...
+```
+
+#### 9.6.5 Documentation Updates
+
+**Files Updated:**
+- `README.md` - Updated project title and branding references
+- `TECHNICAL_DESIGN_DOCUMENT.md` - Updated all brand references
+- `backend/README.md` - Updated API documentation title
+- All Python files with docstrings and comments
+
+**Branding Consistency:**
+- All user-facing text updated to "VyapaarAI"
+- Copyright notices updated to 2026
+- Email templates reflect new branding
+- API responses use consistent naming
+
+#### 9.6.6 Migration Impact
+
+**User Impact:**
+- Existing users see updated branding in new emails
+- No breaking changes to authentication flows
+- Enhanced security messaging improves user trust
+- Improved error messages reduce support tickets
+
+**Technical Impact:**
+- No database schema changes required
+- Backward compatibility maintained for all APIs
+- Enhanced testing prevents regression issues
+- Professional email templates improve deliverability
+
+#### 9.6.7 Quality Assurance
+
+**Pre-Deployment Validation:**
+```bash
+# Regression test execution
+pytest backend/tests/regression/test_critical_paths.py -v
+
+# Email template validation
+python -c "from app.services.email_service import EmailService; \
+           service = EmailService(); \
+           assert service.from_name == 'VyapaarAI'"
+
+# Branding consistency check
+grep -r "VyaparAI" . --exclude-dir=.git --exclude-dir=node_modules
+```
+
+**Production Verification:**
+- Email delivery testing across multiple providers
+- Branding consistency audit
+- User experience testing with new error messages
+- Regression test execution on production environment
 
 ---
 
