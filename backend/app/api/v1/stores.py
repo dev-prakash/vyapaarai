@@ -508,61 +508,75 @@ async def register_store(store_data: StoreRegistration):
 @router.get("/list")
 async def list_stores(limit: int = 100):
     """
-    Get list of all registered stores from DynamoDB
+    Get list of all registered stores from DynamoDB.
+    Paginates through all scan results to ensure no stores are missed.
     """
     try:
-        # Scan DynamoDB table
-        response = stores_table.scan(
-            FilterExpression='#status = :status',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':status': 'active'},
-            Limit=limit
-        )
-
         stores = []
-        for item in response.get('Items', []):
-            # Parse address JSON string
-            address = {}
-            if 'address' in item:
-                try:
-                    address = json.loads(item['address']) if isinstance(item['address'], str) else item['address']
-                except:
-                    address = {}
+        scan_kwargs = {
+            'FilterExpression': '#status = :status',
+            'ExpressionAttributeNames': {'#status': 'status'},
+            'ExpressionAttributeValues': {':status': 'active'},
+        }
 
-            # Parse settings JSON string
-            settings_obj = {}
-            if 'settings' in item:
-                try:
-                    settings_obj = json.loads(item['settings']) if isinstance(item['settings'], str) else item['settings']
-                except:
-                    settings_obj = {}
+        # Paginate through all items — DynamoDB Limit caps items *scanned*,
+        # not items *returned* after filtering, so we must paginate instead.
+        while True:
+            response = stores_table.scan(**scan_kwargs)
 
-            stores.append({
-                "id": item.get('id', item.get('store_id', '')),
-                "store_id": item.get('store_id', item.get('id', '')),
-                "name": item.get('name', ''),
-                "owner_name": item.get('owner_name', ''),
-                "phone": item.get('phone', ''),
-                "email": item.get('email', ''),
-                "city": address.get('city', ''),
-                "state": address.get('state', ''),
-                "address": {
-                    "full": f"{address.get('street', '')}, {address.get('city', '')}, {address.get('state', '')} {address.get('pincode', '')}".strip(),
-                    "street": address.get('street', ''),
+            for item in response.get('Items', []):
+                # Parse address JSON string
+                address = {}
+                if 'address' in item:
+                    try:
+                        address = json.loads(item['address']) if isinstance(item['address'], str) else item['address']
+                    except:
+                        address = {}
+
+                # Parse settings JSON string
+                settings_obj = {}
+                if 'settings' in item:
+                    try:
+                        settings_obj = json.loads(item['settings']) if isinstance(item['settings'], str) else item['settings']
+                    except:
+                        settings_obj = {}
+
+                stores.append({
+                    "id": item.get('id', item.get('store_id', '')),
+                    "store_id": item.get('store_id', item.get('id', '')),
+                    "name": item.get('name', ''),
+                    "owner_name": item.get('owner_name', ''),
+                    "phone": item.get('phone', ''),
+                    "email": item.get('email', ''),
                     "city": address.get('city', ''),
                     "state": address.get('state', ''),
-                    "pincode": address.get('pincode', '')
-                },
-                "latitude": float(item.get('latitude', 0)) if 'latitude' in item else None,
-                "longitude": float(item.get('longitude', 0)) if 'longitude' in item else None,
-                "category": settings_obj.get('store_type', 'General Store'),
-                "rating": 4.5,
-                "isOpen": True,
-                "openingHours": f"{settings_obj.get('business_hours', {}).get('open', '09:00')} - {settings_obj.get('business_hours', {}).get('close', '21:00')}",
-                "registered_at": item.get('created_at', ''),
-                "status": item.get('status', 'active')
-            })
+                    "address": {
+                        "full": f"{address.get('street', '')}, {address.get('city', '')}, {address.get('state', '')} {address.get('pincode', '')}".strip(),
+                        "street": address.get('street', ''),
+                        "city": address.get('city', ''),
+                        "state": address.get('state', ''),
+                        "pincode": address.get('pincode', '')
+                    },
+                    "latitude": float(item.get('latitude', 0)) if 'latitude' in item else None,
+                    "longitude": float(item.get('longitude', 0)) if 'longitude' in item else None,
+                    "category": settings_obj.get('store_type', 'General Store'),
+                    "rating": 4.5,
+                    "isOpen": True,
+                    "openingHours": f"{settings_obj.get('business_hours', {}).get('open', '09:00')} - {settings_obj.get('business_hours', {}).get('close', '21:00')}",
+                    "registered_at": item.get('created_at', ''),
+                    "status": item.get('status', 'active')
+                })
 
+            # Check for more pages
+            if 'LastEvaluatedKey' not in response:
+                break
+            scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+
+            # Stop early if we already have enough results
+            if len(stores) >= limit:
+                break
+
+        stores = stores[:limit]
         print(f"[/list] Found {len(stores)} stores from DynamoDB")
 
         return {

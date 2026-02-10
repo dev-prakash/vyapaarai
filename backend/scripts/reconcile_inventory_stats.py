@@ -49,7 +49,7 @@ AWS_REGION = 'ap-south-1'
 # Table names (explicit because Lambda uses 'production' but data tables use 'prod')
 STORES_TABLE = 'vyaparai-stores-prod'
 PRODUCTS_TABLE = 'vyaparai-store-inventory-prod'
-STATS_TABLE = 'vyaparai-store-stats-production'  # Matches Lambda ENVIRONMENT=production
+STATS_TABLE = 'vyaparai-store-stats-production'  # Production data lives here (not -prod); matches Lambda ENVIRONMENT=production
 
 
 class StatsReconciler:
