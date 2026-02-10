@@ -213,6 +213,58 @@ import { AppProvider as EcommerceContextProvider } from '../contexts'
 
 ## API and Backend Issues
 
+### Nearby Store Search Returns No Results
+
+**Issue Date:** February 10, 2026
+**Status:** RESOLVED
+**Severity:** High
+
+#### Problem Description
+
+Visiting `www.vyapaarai.com/nearby-stores` and searching by Address with State="Uttar Pradesh" and City="Lucknow" returned no results, even though a store exists in the `vyaparai-stores-prod` DynamoDB table.
+
+#### Root Cause
+
+Two bugs in `backend/app/api/v1/stores.py`:
+
+1. **DynamoDB `Limit` parameter misuse**: The `list_stores` endpoint passed `Limit=500` directly to `stores_table.scan()`. DynamoDB's `Limit` caps the number of items **scanned** (evaluated), not the number of items **returned** after `FilterExpression`. With `status = active` as a filter, if the table has 500+ items and the target store appears after position 500 in the scan, it would never be returned. Additionally, `LastEvaluatedKey` pagination was not implemented, so only the first page of results was ever returned.
+
+2. **`float(None)` TypeError**: Some store records had `latitude`/`longitude` keys present but set to `None`. The code used `float(item.get('latitude', 0)) if 'latitude' in item else None`, which called `float(None)` and crashed with `TypeError: float() argument must be a string or a real number, not 'NoneType'`.
+
+#### Solution Implemented
+
+**File:** `backend/app/api/v1/stores.py`
+
+1. **Pagination fix**: Replaced single non-paginated scan with a pagination loop using `LastEvaluatedKey`/`ExclusiveStartKey`. Removed `Limit` parameter from scan kwargs. Added early-stop when enough results are collected.
+
+2. **None lat/lng fix**: Changed from:
+```python
+"latitude": float(item.get('latitude', 0)) if 'latitude' in item else None,
+```
+To:
+```python
+"latitude": float(item['latitude']) if item.get('latitude') is not None else None,
+```
+
+#### Related: Stats Table Naming Inconsistency
+
+A secondary issue was discovered: two DynamoDB tables existed (`vyaparai-store-stats-prod` and `vyaparai-store-stats-production`) due to Lambda setting `ENVIRONMENT=production` while Terraform defaults to `prod`. Fixed by:
+- Adding `STATS_TABLE` constant in `backend/app/core/database.py` defaulting to `vyaparai-store-stats-production`
+- Updating `backend/app/database/stats_repository.py` to use the central constant
+- The empty `vyaparai-store-stats-prod` table can be safely deleted from AWS
+
+#### Verification
+
+```bash
+# Test list_stores returns all active stores
+curl -s "https://6ais2a7oafg5qt5xilobjpijsa0cquje.lambda-url.ap-south-1.on.aws/api/v1/stores/list?limit=500"
+
+# Test nearby search for Lucknow, UP
+curl -s "https://6ais2a7oafg5qt5xilobjpijsa0cquje.lambda-url.ap-south-1.on.aws/api/v1/stores/nearby?city=Lucknow&state=Uttar+Pradesh"
+```
+
+---
+
 ### Market Prices API Not Loading
 
 **Issue:** Market prices showing "Market prices unavailable"
@@ -303,5 +355,5 @@ For issues not covered here:
 
 ---
 
-**Last Updated:** December 2, 2025
-**Document Version:** 1.0
+**Last Updated:** February 10, 2026
+**Document Version:** 1.1

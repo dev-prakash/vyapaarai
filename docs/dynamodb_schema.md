@@ -23,6 +23,11 @@ This document provides comprehensive schema documentation for all DynamoDB table
 │  │  │ProductsTable │ │ MetricsTable │ │RateLimitsTable│             │   │
 │  │  │ (Catalog)    │ │ (Analytics)  │ │ (Rate limit) │              │   │
 │  │  └──────────────┘ └──────────────┘ └──────────────┘              │   │
+│  │                                                                   │   │
+│  │  ┌──────────────┐                                                │   │
+│  │  │StoreStatsTable│                                               │   │
+│  │  │ (Pre-computed)│                                               │   │
+│  │  └──────────────┘                                                │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
@@ -49,6 +54,8 @@ All tables follow the pattern: `vyaparai-{table-name}-{stage}`
 - **dev**: Development environment
 - **staging**: Staging environment
 - **prod**: Production environment
+
+> **Exception**: The store stats table uses `-production` suffix (`vyaparai-store-stats-production`) because `lambda_handler.py` defaults `ENVIRONMENT=production`. The table name is centralized as `STATS_TABLE` in `backend/app/core/database.py` and overridable via `DYNAMODB_STATS_TABLE` env var.
 
 ---
 
@@ -702,6 +709,84 @@ All tables follow the pattern: `vyaparai-{table-name}-{stage}`
 
 ---
 
+## Store Stats Table
+
+### 11. StoreStatsTable
+
+**Table Name**: `vyaparai-store-stats-production`
+
+> **Important**: This table uses the `-production` suffix (not `-prod`) because `lambda_handler.py` sets `ENVIRONMENT=production`. The table name is centralized in `backend/app/core/database.py` as `STATS_TABLE` and can be overridden via the `DYNAMODB_STATS_TABLE` environment variable.
+
+**Purpose**: Pre-computed inventory statistics for instant dashboard loading. Stats are updated atomically on inventory changes and reconciled periodically via batch job.
+
+**Pattern**: Stripe-style running totals (update on write, not compute on read)
+
+**Features**:
+- Atomic counter updates for concurrent safety
+- Periodic batch reconciliation via `backend/scripts/reconcile_inventory_stats.py`
+- Optimistic locking with version attribute
+- PAY_PER_REQUEST billing
+
+#### Key Schema
+
+| Attribute | Type | Key Type | Description |
+|-----------|------|----------|-------------|
+| `store_id` | String | HASH (Partition Key) | Store identifier |
+
+#### Sample Data Structure
+
+```json
+{
+  "store_id": "STORE-01KFSG8S99QMDCC0SKK47Q01JB",
+  "total_products": 150,
+  "active_products": 120,
+  "archived_products": 30,
+  "total_stock_value": 485000.00,
+  "low_stock_count": 8,
+  "out_of_stock_count": 3,
+  "last_updated": "2026-02-10T15:30:00+00:00",
+  "last_reconciled": "2026-02-10T06:00:00+00:00",
+  "version": 42
+}
+```
+
+#### Attributes
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `total_products` | Number | Count of all products in store |
+| `active_products` | Number | Count of non-archived products |
+| `archived_products` | Number | Count of archived products |
+| `total_stock_value` | Number | Sum of (selling_price x current_stock) for active products |
+| `low_stock_count` | Number | Products below min_stock_level |
+| `out_of_stock_count` | Number | Products with 0 stock |
+| `last_updated` | String | ISO timestamp of last atomic update |
+| `last_reconciled` | String | ISO timestamp of last batch reconciliation |
+| `version` | Number | Optimistic locking version counter |
+
+#### Access Patterns
+
+| Access Pattern | Key Condition | Index |
+|----------------|---------------|-------|
+| Get store stats | `store_id = :store_id` | Primary |
+
+#### Reconciliation
+
+Stats are updated atomically on every inventory change (add/remove/update product). A batch reconciliation script runs periodically to correct any drift:
+
+```bash
+# Reconcile all stores
+python backend/scripts/reconcile_inventory_stats.py
+
+# Dry run (show discrepancies only)
+python backend/scripts/reconcile_inventory_stats.py --dry-run
+
+# Reconcile specific store
+python backend/scripts/reconcile_inventory_stats.py --store-id STORE-xxx
+```
+
+---
+
 ## Table Relationships
 
 ```
@@ -898,5 +983,5 @@ All tables use **PAY_PER_REQUEST** (On-Demand) billing for:
 
 ---
 
-*Last Updated: January 2024*
-*Version: 1.0*
+*Last Updated: February 2026*
+*Version: 1.1*
