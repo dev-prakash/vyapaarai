@@ -21,7 +21,6 @@ from datetime import datetime
 from app.services.khata_service import (
     KhataTransactionService,
     TransactionResult,
-    TransactionStatus,
 )
 from app.core.exceptions import (
     CreditLimitExceededError,
