@@ -557,8 +557,8 @@ async def list_stores(limit: int = 100):
                         "state": address.get('state', ''),
                         "pincode": address.get('pincode', '')
                     },
-                    "latitude": float(item.get('latitude', 0)) if 'latitude' in item else None,
-                    "longitude": float(item.get('longitude', 0)) if 'longitude' in item else None,
+                    "latitude": float(item['latitude']) if item.get('latitude') is not None else None,
+                    "longitude": float(item['longitude']) if item.get('longitude') is not None else None,
                     "category": settings_obj.get('store_type', 'General Store'),
                     "rating": 4.5,
                     "isOpen": True,
