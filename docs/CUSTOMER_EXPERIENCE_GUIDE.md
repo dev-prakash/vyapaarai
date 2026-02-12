@@ -4,7 +4,7 @@
 
 This document covers the customer-facing features and user experience flows in VyaparAI, including authentication, store discovery, shopping, cart management, and checkout.
 
-**Last Updated**: December 3, 2025
+**Last Updated**: February 11, 2026
 **Status**: Production-ready features documented
 
 ---
@@ -17,7 +17,8 @@ This document covers the customer-facing features and user experience flows in V
 4. [Cart Management](#cart-management)
 5. [Profile Management](#profile-management)
 6. [Checkout Process](#checkout-process)
-7. [November 2025 UX Enhancements](#november-2025-ux-enhancements)
+7. [Guest Checkout Flow](#guest-checkout-flow)
+8. [November 2025 UX Enhancements](#november-2025-ux-enhancements)
 
 ---
 
@@ -347,6 +348,163 @@ When guest authenticates:
 
 ---
 
+## Guest Checkout Flow
+
+**Added**: February 11, 2026
+**Status**: Production-ready
+
+### Overview
+
+Guest customers (non-authenticated users) can browse stores, add products to cart, and complete checkout without creating an account. This is the primary acquisition funnel for new users.
+
+### Complete Guest Journey
+
+```
+/nearby-stores → Search by State/City → Select Store
+     ↓
+/store/{storeId} → Browse Products → Add to Cart (5-10 items)
+     ↓
+/checkout → Fill Info → Delivery Details → Payment → Place Order
+     ↓
+/order/{orderId}/track → Order Confirmation & Tracking
+```
+
+### Step 1: Store Discovery (`/nearby-stores`)
+
+**Component**: `/frontend-pwa/src/pages/NearbyStoresEnhanced.tsx`
+
+Guest users can search for stores using:
+- **GPS-based search** (recommended, requires location permission)
+- **Manual address search** with State + City dropdowns
+
+**Manual Search Flow**:
+1. Click "Search by Address" tab
+2. Select State from dropdown (e.g., "Uttar Pradesh")
+3. Type and select City (e.g., "Lucknow")
+4. Auto-search triggers after 500ms debounce
+5. Geocodes via Nominatim API → calls `GET /api/v1/stores/nearby?city=Lucknow&state=Uttar Pradesh`
+
+### Step 2: Add Products to Cart (`/store/{storeId}`)
+
+**Component**: `/frontend-pwa/src/pages/StoreDetailPage.tsx`
+
+**Cart Architecture** (Updated Feb 2026):
+- Local React state for UI responsiveness (instant +/- buttons)
+- **Zustand store** (`useCartStore`) for cross-page persistence
+- Both stores are synchronized on every add/remove action
+- Cart persisted in `localStorage` under key `vyaparai-cart`
+
+**Floating Cart Bar**:
+- Appears at bottom when items > 0
+- Shows item count and running total
+- "Checkout" button navigates to `/checkout`
+- Centered design (max 600px width)
+
+### Step 3: Checkout (`/checkout`)
+
+**Component**: `/frontend-pwa/src/pages/CustomerCheckout.tsx`
+
+Three-step form wizard:
+
+#### Step 3a: Customer Information
+| Field | Required | Validation |
+|-------|----------|------------|
+| Full Name | Yes | Min 2 characters |
+| Phone Number | Yes | 10-digit Indian number |
+| Email | No | Valid email format |
+
+#### Step 3b: Delivery Details
+| Field | Required | Validation |
+|-------|----------|------------|
+| Delivery Address | Yes | Min 5 characters |
+| Landmark | No | Free text |
+| City | Yes | Min 2 characters |
+| State | Yes | Min 2 characters |
+| Pincode | Yes | 6-digit number |
+| Delivery Slot | Yes | Select (Morning/Afternoon/Evening) |
+
+#### Step 3c: Payment & Review
+- Order summary with all items, subtotal, GST (5%), and total
+- Payment method selection (Cash on Delivery)
+- "Place Order" button
+
+### Step 4: Order Placement
+
+**Backend API**: `POST /api/v1/orders/`
+
+**Request Payload** (snake_case):
+```json
+{
+  "store_id": "STORE-01KFSG8S99QMDCC0SKK47Q01JB",
+  "customer_name": "Raj Kumar",
+  "customer_phone": "9876543210",
+  "customer_email": "raj@example.com",
+  "delivery_address": "123 Main Street, Near Hazratganj, Lucknow, Uttar Pradesh 226001",
+  "items": [
+    {
+      "product_id": "PROD-ABC123",
+      "product_name": "Amul Milk 500ml",
+      "quantity": 2,
+      "unit_price": 30.0,
+      "unit": "pieces"
+    }
+  ],
+  "payment_method": "cod",
+  "channel": "web"
+}
+```
+
+**Backend Processing** (Saga Pattern):
+1. Validate request → Calculate subtotal
+2. Calculate GST (via `gst_service` or 18% fallback)
+3. Reserve stock (decrement inventory atomically)
+4. Create order record in DynamoDB
+5. If any step fails → rollback stock reservations
+
+**Success Response**: Redirects to `/order/{orderId}/track`
+
+### Technical Architecture
+
+```
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│  StoreDetailPage │      │  useCartStore     │      │ CustomerCheckout │
+│  (local state +  │─────▶│  (Zustand +       │─────▶│  (reads from     │
+│   Zustand sync)  │      │   localStorage)   │      │   Zustand store) │
+└──────────────────┘      └──────────────────┘      └────────┬─────────┘
+                                                              │
+                                                   POST /api/v1/orders/
+                                                              │
+                                                              ▼
+                                                   ┌──────────────────┐
+                                                   │  orders.py       │
+                                                   │  (validate +     │
+                                                   │   GST calc)      │
+                                                   └────────┬─────────┘
+                                                            │
+                                                            ▼
+                                                   ┌──────────────────┐
+                                                   │  order_txn_svc   │
+                                                   │  (saga pattern:  │
+                                                   │   reserve stock  │
+                                                   │   → create order │
+                                                   │   → rollback)    │
+                                                   └──────────────────┘
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `frontend-pwa/src/pages/StoreDetailPage.tsx` | Store page with cart integration |
+| `frontend-pwa/src/pages/CustomerCheckout.tsx` | 3-step checkout wizard |
+| `frontend-pwa/src/stores/cartStore.ts` | Zustand cart state (localStorage persistence) |
+| `backend/app/api/v1/orders.py` | Order creation API endpoint |
+| `backend/app/services/order_transaction_service.py` | Saga pattern for stock reservation |
+| `backend/app/services/gst_service.py` | GST calculation service |
+| `backend/app/services/inventory_service.py` | Stock management and validation |
+
+---
+
 ## November 2025 UX Enhancements
 
 ### 1. Profile Completion (Optional)
@@ -534,6 +692,6 @@ Market Price: ₹35-45 (updated today)
 
 ---
 
-**Last Updated**: December 3, 2025
-**Document Version**: 1.0.0
+**Last Updated**: February 11, 2026
+**Document Version**: 1.1.0
 **Status**: Production Features Documented

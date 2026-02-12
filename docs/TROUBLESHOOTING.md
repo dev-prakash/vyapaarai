@@ -345,15 +345,178 @@ if ('serviceWorker' in navigator) {
 
 ---
 
+### Guest Checkout - Cart Empty on Checkout Page
+
+**Issue Date:** February 11, 2026
+**Status:** RESOLVED
+**Severity:** Critical
+
+#### Problem Description
+
+Guest customers (not logged in) could add products to cart on the Store Detail Page (`/store/{storeId}`), but when clicking "Checkout", the `/checkout` page showed an empty cart with ₹0 total.
+
+#### Root Cause
+
+The `StoreDetailPage.tsx` used only local React state (`useState({})`) for cart management. When navigating to `/checkout`, the `CustomerCheckout.tsx` component reads cart data from the global Zustand store (`useCartStore`), which was never populated by the store page.
+
+**Cart state disconnect:**
+- `StoreDetailPage.tsx` → local `useState` only
+- `CustomerCheckout.tsx` → reads from `useCartStore` (Zustand, persisted in localStorage)
+- No bridge between the two → checkout always shows empty cart
+
+#### Solution Implemented
+
+**File:** `frontend-pwa/src/pages/StoreDetailPage.tsx`
+
+1. Imported `useCartStore` from `'../stores/cartStore'`
+2. On component mount, set store context: `useCartStore.getState().setStoreId(storeId)`
+3. In `handleAddToCart` and `handleRemoveFromCart`, sync cart changes to Zustand store via `useCartStore.setState()` alongside local state updates
+4. Simplified `handleCheckout` to just `navigate('/checkout')` since Zustand is now the source of truth
+
+**Key implementation detail:** Used direct `useCartStore.setState()` instead of `cartStore.addItem()` because the latter does a backend API sync and rolls back on failure for guest users.
+
+#### Verification
+
+1. Navigate to any store page (e.g., `https://www.vyapaarai.com/store/STORE-01KFSG8S99QMDCC0SKK47Q01JB`)
+2. Add 3+ products to cart
+3. Open browser console → `JSON.parse(localStorage.getItem('vyaparai-cart'))`
+4. Verify items array has all added products with correct quantities
+5. Click "Checkout" → verify checkout page shows all items with correct totals
+
+---
+
+### Guest Checkout - Order Creation TypeError (float * Decimal)
+
+**Issue Date:** February 11, 2026
+**Status:** RESOLVED
+**Severity:** Critical
+
+#### Problem Description
+
+When placing an order, the backend returned:
+```
+Order creation failed: unsupported operand type(s) for *: 'float' and 'decimal.Decimal'
+```
+
+#### Root Cause
+
+In `backend/app/api/v1/orders.py` line 1349, the GST fallback calculation (used when the GST service fails to find product HSN codes) mixed Python `float` and `decimal.Decimal` types:
+
+```python
+# BUG: subtotal is float, Decimal('0.18') is Decimal → TypeError
+tax_amount = float(subtotal * Decimal('0.18'))
+```
+
+The `subtotal` variable was a `float` (from `sum(float * float)` price calculations), but `Decimal('0.18')` is a `Decimal`. Python does not allow `float * Decimal` arithmetic.
+
+#### Solution Implemented
+
+**File:** `backend/app/api/v1/orders.py` line 1349
+
+```python
+# Before:
+tax_amount = float(subtotal * Decimal('0.18'))
+
+# After:
+tax_amount = float(Decimal(str(subtotal)) * Decimal('0.18'))
+```
+
+Converts `subtotal` to `Decimal` via string representation first, ensuring both operands are `Decimal` type.
+
+#### Verification
+
+```bash
+# Place a test order via API
+curl -X POST "https://jxxi8dtx1f.execute-api.ap-south-1.amazonaws.com/api/v1/orders/" \
+  -H "Content-Type: application/json" \
+  -H "X-Session-ID: test-session" \
+  -d '{
+    "store_id": "STORE-01KFSG8S99QMDCC0SKK47Q01JB",
+    "customer_name": "Test User",
+    "customer_phone": "9876543210",
+    "delivery_address": "Test Address",
+    "items": [{"product_name": "Test Product", "unit_price": 100, "quantity": 1}],
+    "payment_method": "cod"
+  }'
+```
+
+---
+
+### Guest Checkout - Missing product_id in Order Items
+
+**Issue Date:** February 11, 2026
+**Status:** RESOLVED
+**Severity:** High
+
+#### Problem Description
+
+After fixing the Decimal TypeError, orders failed with:
+```
+Missing product_id in item: {'product_id': None, 'quantity_change': -1}
+```
+
+#### Root Cause
+
+The `CustomerCheckout.tsx` was not including `product_id` in the order items payload sent to the backend. The backend's `order_transaction_service.create_order_with_stock_reservation()` uses the saga pattern and needs `product_id` to reserve stock (decrement inventory). Without it, the `inventory_service.update_stock_bulk_transactional()` rejects items with `None` product_id.
+
+#### Solution Implemented
+
+**File:** `frontend-pwa/src/pages/CustomerCheckout.tsx`
+
+Added `product_id` to the items mapping in `handlePlaceOrder`:
+
+```typescript
+items: items.map(item => ({
+  product_id: item.id || undefined,  // Added this field
+  product_name: item.name,
+  quantity: item.quantity,
+  unit_price: item.price,
+  unit: item.unit || 'pieces',
+})),
+```
+
+#### Additional Fixes in CustomerCheckout.tsx
+
+| Fix | Description |
+|-----|-------------|
+| **Store ID** | Changed from hardcoded `'store_123'` to dynamic `useCartStore().storeId` |
+| **City/State/Pincode** | Added form fields for city, state, pincode (was hardcoded to Mumbai/Maharashtra/400001) |
+| **API URL** | Direct `fetch()` to `API_BASE_URL + '/api/v1/orders/'` bypassing broken `orderService` path |
+| **Request payload** | Transformed to match backend `CreateOrderRequest` schema (snake_case fields) |
+
+---
+
+### Store Detail Page - No Products Displayed
+
+**Issue Date:** February 10, 2026
+**Status:** RESOLVED
+**Severity:** High
+
+#### Problem Description
+
+Store detail page at `/store/{storeId}` showed store information but no products, displaying "No products available" even though the store has products in inventory.
+
+#### Root Cause
+
+The `GET /api/v1/stores/{store_id}` endpoint was querying the `vyaparai-products-prod` table which only contains product master data (catalog), not the actual store inventory. The store's products are stored in `vyaparai-inventory-prod` (or `vyaparai-store-inventory-prod`) with `store_id` as partition key.
+
+#### Solution Implemented
+
+**File:** `backend/app/api/v1/stores.py`
+
+Updated the store detail endpoint to query the inventory table instead of the products table, and properly transform inventory items into the product format expected by the frontend.
+
+---
+
 ## Contact and Support
 
 For issues not covered here:
 1. Check application logs in browser console
-2. Check backend Lambda logs: `aws logs tail /aws/lambda/vyaparai-backend-prod`
+2. Check backend Lambda logs: `aws logs tail /aws/lambda/vyaparai-api-prod`
 3. Review recent deployments and changes
 4. Contact development team
 
 ---
 
-**Last Updated:** February 10, 2026
-**Document Version:** 1.1
+**Last Updated:** February 11, 2026
+**Document Version:** 1.2

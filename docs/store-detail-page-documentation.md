@@ -348,14 +348,22 @@ reviews_response = dynamodb.query(
 
 ### Floating Cart (Bottom)
 **Data Sources**:
-- Cart items → localStorage (client-side)
+- Cart items → Zustand store (`useCartStore`) persisted in `localStorage` key `vyaparai-cart`
 - Product details → From loaded products array
 - Total price → Calculated from cart × product prices
+
+**Architecture** (Updated February 2026):
+- Local React state for instant UI updates (optimistic UI)
+- Zustand store for cross-page persistence and checkout integration
+- Both synchronized on every add/remove action
+- `useCartStore.setState()` used directly (avoids backend API sync for guest users)
 
 **Functionality**:
 - Shows only when cart has items
 - Displays item count and total price
-- Checkout button navigates to `/checkout`
+- Centered design (max 600px width, horizontally centered)
+- Checkout button navigates to `/checkout` (reads from Zustand store)
+- Container has bottom padding to prevent content overlap with cart bar
 
 ---
 
@@ -375,18 +383,19 @@ reviews_response = dynamodb.query(
 ### 2. Adding Products to Cart
 **Flow**:
 1. User clicks "Add to Cart" on a product
-2. Product added to localStorage cart
-3. Floating cart appears/updates
-4. User can increment/decrement quantities
+2. Product added to both local React state AND Zustand store
+3. Zustand store persists to `localStorage` under key `vyaparai-cart`
+4. Floating cart appears/updates with item count and total
+5. User can increment/decrement quantities with +/- buttons
 
 ### 3. Checkout
 **Flow**:
 1. User clicks "Checkout" on floating cart
-2. Navigate to `/checkout` with state:
-   - Store information
-   - Cart items (product + quantity)
-   - Total price
-3. Customer completes order
+2. Navigate to `/checkout` (no state passed — Zustand store is source of truth)
+3. `CustomerCheckout.tsx` reads cart items, storeId from `useCartStore`
+4. Customer fills 3-step form: Info → Delivery → Payment & Review
+5. Order placed via `POST /api/v1/orders/` with saga-pattern stock reservation
+6. Redirects to `/order/{orderId}/track` on success
 
 ### 4. Contacting Store
 **Flow**:
@@ -439,10 +448,11 @@ reviews_response = dynamodb.query(
 | Frontend Page | ✅ Complete | StoreDetailPage.tsx fully implemented |
 | Backend API Endpoint | ✅ Complete | GET /api/v1/stores/{store_id} working |
 | Store Info Display | ✅ Working | Data from vyaparai-stores-prod |
-| Products Tab | ⚠️ Ready | API ready, no inventory/products data yet |
+| Products Tab | ✅ Working | Products loaded from `vyaparai-inventory-prod` table |
 | Reviews Tab | ⚠️ Ready | API ready, reviews table doesn't exist yet |
 | About Store Tab | ✅ Working | Uses store settings |
-| Cart Functionality | ✅ Working | localStorage-based cart |
+| Cart Functionality | ✅ Working | Zustand store + localStorage persistence (Feb 2026) |
+| Guest Checkout | ✅ Working | Full guest checkout flow with COD (Feb 2026) |
 | Error Handling | ✅ Complete | Graceful fallbacks for missing tables |
 | Routing | ✅ Working | /store/:storeId route active |
 | Responsive Design | ✅ Complete | Mobile-first Material-UI layout |
@@ -685,7 +695,7 @@ curl "https://6ais2a7oafg5qt5xilobjpijsa0cquje.lambda-url.ap-south-1.on.aws/api/
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: October 23, 2025
-**Author**: Claude (AI Assistant)
+**Document Version**: 1.1
+**Last Updated**: February 11, 2026
+**Author**: DevPrakash
 **Status**: Production Deployed ✅
