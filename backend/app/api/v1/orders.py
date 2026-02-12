@@ -1346,7 +1346,7 @@ async def create_order_with_payment(
         except Exception as e:
             # Fallback to default 18% if GST service fails
             logger.warning(f"GST service error, using default 18%: {e}")
-            tax_amount = float(subtotal * Decimal('0.18'))
+            tax_amount = float(Decimal(str(subtotal)) * Decimal('0.18'))
 
         delivery_fee = 20 if subtotal < 200 else 0
         total_amount = float(subtotal) + tax_amount + delivery_fee

@@ -26,6 +26,7 @@ from app.core.security import get_current_store_owner
 from app.core.database import get_dynamodb, STORES_TABLE, SESSIONS_TABLE
 from app.services.store_search_service import store_search_service
 from app.services.geocoding_service import geocoding_service
+from app.services.inventory_service import inventory_service
 
 router = APIRouter(prefix="/stores", tags=["stores"])
 
@@ -508,61 +509,75 @@ async def register_store(store_data: StoreRegistration):
 @router.get("/list")
 async def list_stores(limit: int = 100):
     """
-    Get list of all registered stores from DynamoDB
+    Get list of all registered stores from DynamoDB.
+    Paginates through all scan results to ensure no stores are missed.
     """
     try:
-        # Scan DynamoDB table
-        response = stores_table.scan(
-            FilterExpression='#status = :status',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':status': 'active'},
-            Limit=limit
-        )
-
         stores = []
-        for item in response.get('Items', []):
-            # Parse address JSON string
-            address = {}
-            if 'address' in item:
-                try:
-                    address = json.loads(item['address']) if isinstance(item['address'], str) else item['address']
-                except:
-                    address = {}
+        scan_kwargs = {
+            'FilterExpression': '#status = :status',
+            'ExpressionAttributeNames': {'#status': 'status'},
+            'ExpressionAttributeValues': {':status': 'active'},
+        }
 
-            # Parse settings JSON string
-            settings_obj = {}
-            if 'settings' in item:
-                try:
-                    settings_obj = json.loads(item['settings']) if isinstance(item['settings'], str) else item['settings']
-                except:
-                    settings_obj = {}
+        # Paginate through all items — DynamoDB Limit caps items *scanned*,
+        # not items *returned* after filtering, so we must paginate instead.
+        while True:
+            response = stores_table.scan(**scan_kwargs)
 
-            stores.append({
-                "id": item.get('id', item.get('store_id', '')),
-                "store_id": item.get('store_id', item.get('id', '')),
-                "name": item.get('name', ''),
-                "owner_name": item.get('owner_name', ''),
-                "phone": item.get('phone', ''),
-                "email": item.get('email', ''),
-                "city": address.get('city', ''),
-                "state": address.get('state', ''),
-                "address": {
-                    "full": f"{address.get('street', '')}, {address.get('city', '')}, {address.get('state', '')} {address.get('pincode', '')}".strip(),
-                    "street": address.get('street', ''),
+            for item in response.get('Items', []):
+                # Parse address JSON string
+                address = {}
+                if 'address' in item:
+                    try:
+                        address = json.loads(item['address']) if isinstance(item['address'], str) else item['address']
+                    except:
+                        address = {}
+
+                # Parse settings JSON string
+                settings_obj = {}
+                if 'settings' in item:
+                    try:
+                        settings_obj = json.loads(item['settings']) if isinstance(item['settings'], str) else item['settings']
+                    except:
+                        settings_obj = {}
+
+                stores.append({
+                    "id": item.get('id', item.get('store_id', '')),
+                    "store_id": item.get('store_id', item.get('id', '')),
+                    "name": item.get('name', ''),
+                    "owner_name": item.get('owner_name', ''),
+                    "phone": item.get('phone', ''),
+                    "email": item.get('email', ''),
                     "city": address.get('city', ''),
                     "state": address.get('state', ''),
-                    "pincode": address.get('pincode', '')
-                },
-                "latitude": float(item.get('latitude', 0)) if 'latitude' in item else None,
-                "longitude": float(item.get('longitude', 0)) if 'longitude' in item else None,
-                "category": settings_obj.get('store_type', 'General Store'),
-                "rating": 4.5,
-                "isOpen": True,
-                "openingHours": f"{settings_obj.get('business_hours', {}).get('open', '09:00')} - {settings_obj.get('business_hours', {}).get('close', '21:00')}",
-                "registered_at": item.get('created_at', ''),
-                "status": item.get('status', 'active')
-            })
+                    "address": {
+                        "full": f"{address.get('street', '')}, {address.get('city', '')}, {address.get('state', '')} {address.get('pincode', '')}".strip(),
+                        "street": address.get('street', ''),
+                        "city": address.get('city', ''),
+                        "state": address.get('state', ''),
+                        "pincode": address.get('pincode', '')
+                    },
+                    "latitude": float(item['latitude']) if item.get('latitude') is not None else None,
+                    "longitude": float(item['longitude']) if item.get('longitude') is not None else None,
+                    "category": settings_obj.get('store_type', 'General Store'),
+                    "rating": 4.5,
+                    "isOpen": True,
+                    "openingHours": f"{settings_obj.get('business_hours', {}).get('open', '09:00')} - {settings_obj.get('business_hours', {}).get('close', '21:00')}",
+                    "registered_at": item.get('created_at', ''),
+                    "status": item.get('status', 'active')
+                })
 
+            # Check for more pages
+            if 'LastEvaluatedKey' not in response:
+                break
+            scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+
+            # Stop early if we already have enough results
+            if len(stores) >= limit:
+                break
+
+        stores = stores[:limit]
         print(f"[/list] Found {len(stores)} stores from DynamoDB")
 
         return {
@@ -778,6 +793,22 @@ async def get_store_details(store_id: str):
 
         print(f"[get_store_details] All fields parsed, building response...")
 
+        # Fetch real products from inventory table
+        store_products = []
+        total_products = 0
+        try:
+            inventory_result = await inventory_service.get_products(
+                store_id=store_id,
+                page=1,
+                limit=100
+            )
+            store_products = inventory_result.get("products", [])
+            total_products = inventory_result.get("total", len(store_products))
+            print(f"[get_store_details] Fetched {total_products} products for store {store_id}")
+        except Exception as inv_err:
+            print(f"[get_store_details] Warning: Failed to fetch products: {inv_err}")
+            # Non-fatal: continue with empty products rather than failing the whole response
+
         # Build response with comprehensive error handling
         try:
             store_response = {
@@ -805,10 +836,9 @@ async def get_store_details(store_id: str):
                     "rating_count": 0,
                     "openingHours": f"{settings_obj.get('business_hours', {}).get('open', '09:00')} - {settings_obj.get('business_hours', {}).get('close', '21:00')}",
                     "status": item.get('status', 'active'),
-                    # Include empty products and reviews arrays for frontend compatibility
-                    "products": [],
+                    "products": store_products,
                     "reviews": [],
-                    "total_products": 0,
+                    "total_products": total_products,
                     "description": store_profile.get('description', 'Your neighborhood store'),
                     "tagline": store_profile.get('tagline', ''),
                 }

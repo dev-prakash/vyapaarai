@@ -19,6 +19,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from app.core.config import settings
+from app.core.database import STATS_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,8 @@ class StoreStatsRepository:
     - version (Number) - For optimistic locking
     """
 
-    # Table name based on environment
-    TABLE_NAME = f"vyaparai-store-stats-{settings.ENVIRONMENT.lower()}"
+    # Table name from central constant (avoids -prod vs -production mismatch)
+    TABLE_NAME = STATS_TABLE
 
     def __init__(self):
         """Initialize repository with DynamoDB connection"""
